@@ -12,7 +12,7 @@ import java.io.File
 object BundledTestAssets {
     const val ONNX_DISPLAY_NAME = "bundled_pose_fp16.onnx"
     const val VIDEO_DISPLAY_NAME = "behavior_test_20s.mp4"
-    const val TWO_ANIMAL_VIDEO_DISPLAY_NAME = "mars_two_mouse_20s.mp4"
+    const val TWO_ANIMAL_VIDEO_DISPLAY_NAME = "two_subject_20s.mp4"
 
     val ncnnAssetPaths: List<String> = listOf(
         "test_bundle/ncnn/model.ncnn.param",
@@ -32,7 +32,7 @@ object BundledTestAssets {
         expectedBytes = 303_654L
     )
     private val twoAnimalTestVideo = AssetSpec(
-        assetPath = "tandem_benchmark/video/mars_two_mouse_20s.mp4",
+        assetPath = "tandem_benchmark/video/two_subject_20s.mp4",
         outputName = TWO_ANIMAL_VIDEO_DISPLAY_NAME,
         expectedBytes = 10_626_970L
     )

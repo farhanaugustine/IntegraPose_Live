@@ -27,6 +27,7 @@ class AppDataStore(private val context: Context) {
     private val boundingBoxColorKey = stringPreferencesKey("bounding_box_color")
     private val keypointColorKey = stringPreferencesKey("keypoint_color")
     private val roiLabelSizeKey = stringPreferencesKey("roi_label_size")
+    private val showClassIndexKey = booleanPreferencesKey("show_class_index")
     private val trackerMinimumConfidenceKey =
         floatPreferencesKey("tracker_minimum_confidence")
     private val trackerNewTrackConfidenceKey =
@@ -76,7 +77,9 @@ class AppDataStore(private val context: Context) {
                 roiLabelSize = RoiLabelSize.fromStoredName(
                     preferences[roiLabelSizeKey],
                     AnnotationStyle.Default.roiLabelSize
-                )
+                ),
+                showClassIndex = preferences[showClassIndexKey]
+                    ?: AnnotationStyle.Default.showClassIndex
             )
         }
 
@@ -125,6 +128,7 @@ class AppDataStore(private val context: Context) {
             prefs[boundingBoxColorKey] = style.boundingBoxColor.name
             prefs[keypointColorKey] = style.keypointColor.name
             prefs[roiLabelSizeKey] = style.roiLabelSize.name
+            prefs[showClassIndexKey] = style.showClassIndex
         }
     }
 

@@ -374,7 +374,7 @@ fun BenchmarkScreen(
                             if (preparingTwoAnimalVideo) {
                                 "Preparing two-animal video..."
                             } else {
-                                "Use two-animal MARS 20-second video"
+                                "Use internal two-subject 20-second video"
                             }
                         )
                     }
@@ -858,7 +858,7 @@ private fun DebugTandemBenchmarkCard() {
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text(
-                "Private NCNN + temporal benchmark",
+                "Internal pose + temporal benchmark",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = Color(0xFFE9DFFF)

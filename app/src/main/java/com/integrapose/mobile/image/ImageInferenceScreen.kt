@@ -107,14 +107,14 @@ fun ImageInferenceScreen(
                 errorText = null
                 try {
                     val decoded = decodeImage(context, uri)
-                        sourceBitmap?.recycle()
-                        sourceBitmap = decoded
-                        selectedName = uri.lastPathSegment ?: "selected image"
-                        inference = null
-                        benchmark = null
-                        outputText = null
-                        csvPath = null
-                        annotatedImagePath = null
+                    sourceBitmap?.recycle()
+                    sourceBitmap = decoded
+                    selectedName = uri.lastPathSegment ?: "selected image"
+                    inference = null
+                    benchmark = null
+                    outputText = null
+                    csvPath = null
+                    annotatedImagePath = null
                 } catch (error: Throwable) {
                     errorText = error.message ?: "Unable to decode image."
                 } finally {

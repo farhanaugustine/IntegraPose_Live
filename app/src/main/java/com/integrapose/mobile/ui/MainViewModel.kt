@@ -115,6 +115,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         updateAnnotationStyle(uiState.value.annotationStyle.copy(roiLabelSize = size))
     }
 
+    fun setShowClassIndex(show: Boolean) {
+        updateAnnotationStyle(uiState.value.annotationStyle.copy(showClassIndex = show))
+    }
+
     fun setTrackerConfig(config: IoUTrackerConfig) {
         val sanitized = config.sanitized()
         _uiState.update {
@@ -438,10 +442,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     companion object {
-        private const val BUNDLED_NCNN_NAME = "Bundled mouse pose (NCNN CPU FP16)"
+        private const val BUNDLED_NCNN_NAME = "Internal pose A (NCNN CPU FP16)"
         private const val BUNDLED_TWO_ANIMAL_NCNN_NAME =
-            "Bundled MARS two-animal pose (NCNN CPU FP16, detection count 2)"
-        private const val BUNDLED_ONNX_NAME = "Bundled mouse pose (ONNX CPU FP16)"
+            "Internal pose B (NCNN CPU FP16, detection count 2)"
+        private const val BUNDLED_ONNX_NAME = "Internal pose A (ONNX CPU FP16)"
 
         fun factory(application: Application): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {

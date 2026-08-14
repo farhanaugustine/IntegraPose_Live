@@ -22,12 +22,14 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -51,6 +53,7 @@ fun SettingsScreen(
     onBoundingBoxColorChange: (AnnotationColorPreset) -> Unit,
     onKeypointColorChange: (AnnotationColorPreset) -> Unit,
     onRoiLabelSizeChange: (RoiLabelSize) -> Unit,
+    onShowClassIndexChange: (Boolean) -> Unit,
     onSkeletonConnectionsChange: (String, List<KeypointConnection>) -> Unit,
     onTrackerConfigChange: (IoUTrackerConfig) -> Unit
 ) {
@@ -114,11 +117,37 @@ fun SettingsScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = Color(0xFFBDD0E7)
                 )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Text(
+                            "Show numeric class IDs",
+                            color = Color(0xFFE8EFF9)
+                        )
+                        Text(
+                            "Adds the model's zero-based class ID to detection labels. " +
+                                "This changes annotations only; CSV exports are unaffected.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFFBDD0E7)
+                        )
+                    }
+                    Switch(
+                        checked = style.showClassIndex,
+                        onCheckedChange = onShowClassIndexChange
+                    )
+                }
                 OutlinedButton(
                     onClick = {
                         onBoundingBoxColorChange(AnnotationStyle.Default.boundingBoxColor)
                         onKeypointColorChange(AnnotationStyle.Default.keypointColor)
                         onRoiLabelSizeChange(AnnotationStyle.Default.roiLabelSize)
+                        onShowClassIndexChange(AnnotationStyle.Default.showClassIndex)
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) {

@@ -1,14 +1,12 @@
 package com.integrapose.mobile.model
 
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.SerialName
 
 /** Output layouts accepted by the detection and pose postprocessor. */
 @Serializable
 enum class ModelOutputFormat {
     AUTO,
-    /** Legacy serialized name for raw bbox/class rows with optional keypoints. */
-    @SerialName("RAW_YOLO")
+    /** Raw bbox/class rows with optional keypoint triplets. */
     RAW_PREDICTIONS,
     END_TO_END,
 

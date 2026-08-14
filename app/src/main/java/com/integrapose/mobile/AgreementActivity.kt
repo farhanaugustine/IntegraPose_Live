@@ -46,8 +46,7 @@ import kotlinx.coroutines.launch
 class AgreementActivity : ComponentActivity() {
     private val requiredPermissions: Array<String>
         get() = arrayOf(
-            Manifest.permission.CAMERA,
-            Manifest.permission.RECORD_AUDIO
+            Manifest.permission.CAMERA
         )
 
     private val permissionLauncher = registerForActivityResult(

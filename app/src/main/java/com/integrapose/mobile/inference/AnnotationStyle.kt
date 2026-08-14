@@ -58,7 +58,8 @@ object RoiAnnotationPalette {
 data class AnnotationStyle(
     val boundingBoxColor: AnnotationColorPreset = AnnotationColorPreset.MINT_GREEN,
     val keypointColor: AnnotationColorPreset = AnnotationColorPreset.ORANGE,
-    val roiLabelSize: RoiLabelSize = RoiLabelSize.SMALL
+    val roiLabelSize: RoiLabelSize = RoiLabelSize.SMALL,
+    val showClassIndex: Boolean = false
 ) {
     val boxArgb: Int get() = boundingBoxColor.argb
     val keypointArgb: Int get() = keypointColor.argb

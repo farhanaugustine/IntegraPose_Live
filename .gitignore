@@ -25,6 +25,22 @@ signing.properties
 *.sha256
 SHA256SUMS*
 
+# Model weights and private validation media
+*.onnx
+*.pt
+*.pth
+*.tflite
+*.torchscript
+*.safetensors
+*.ncnn.bin
+*.param
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.wav
+
 # Private R&D and local validation data
 models_videos/
 emulator_outputs/

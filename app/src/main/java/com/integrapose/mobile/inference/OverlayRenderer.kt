@@ -292,11 +292,7 @@ object OverlayRenderer {
                 }
             }
 
-            val label = buildString {
-                detection.trackId?.let { append("T$it ") }
-                append("#${detection.classIndex} ${detection.className} ")
-                append(String.format(Locale.US, "%.2f", detection.confidence))
-            }
+            val label = formatDetectionLabel(detection, annotationStyle.showClassIndex)
             val textWidth = textPaint.measureText(label)
             val textHeight = textPaint.textSize + 8f
             val labelTop = (top - textHeight).coerceAtLeast(0f)
@@ -308,6 +304,19 @@ object OverlayRenderer {
 
     private const val KEYPOINT_THRESHOLD = 0.25f
     private val BITMAP_PAINT = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+}
+
+internal fun formatDetectionLabel(
+    detection: DetectionResult,
+    showClassIndex: Boolean
+): String = buildString {
+    detection.trackId?.let { append("T$it ") }
+    if (showClassIndex) append("#${detection.classIndex} ")
+    detection.className.trim().takeIf(String::isNotEmpty)?.let {
+        append(it)
+        append(' ')
+    }
+    append(String.format(Locale.US, "%.2f", detection.confidence))
 }
 
 internal data class OrientedCropGeometry(

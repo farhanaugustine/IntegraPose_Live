@@ -64,9 +64,9 @@ class IoUTracker(config: IoUTrackerConfig = IoUTrackerConfig()) {
                     .maxByOrNull { it.second }
                     ?.first
                 if (best != null) {
+                    available.remove(best)
                     best.box = detection.box
                     best.lastFrame = frameIndex
-                    available.remove(best)
                     assignments[index] = best
                 }
             }

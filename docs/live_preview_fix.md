@@ -138,6 +138,22 @@ At recording start:
    fixed for the session;
 4. unlock only after Stop and all files have finalized.
 
+### Recording-start regression guard (2026-08-11)
+
+`SCREEN_ORIENTATION_LOCKED` does not itself preserve the values already read by
+Compose. Starting the default raw recording also adds `VideoCapture`, which
+rebinds the CameraX use-case group. If that rebind reads `Display.rotation` from
+one side of the Activity-lock transition and `Configuration.orientation` from
+the other, the preview can remain upright while boxes and keypoints are mapped
+with a different rotation or viewport aspect.
+
+`LiveCameraGeometrySession` now snapshots both values as one immutable pair
+*before* requesting the Activity lock. Preview, ImageAnalysis, VideoCapture, and
+the shared ViewPort use that pair during preparation, recording, and output
+finalization. The snapshot is released only when recording startup fails,
+camera binding fails, finalization completes, or the Live screen is disposed.
+Do not replace this with independent live reads inside the recording rebind.
+
 Without this lock, rotating the emulator during recording recreated the
 Activity, finalized CameraX with `ERROR_SOURCE_INACTIVE`, reset the UI to
 **Start recording**, and bypassed the normal result handoff.

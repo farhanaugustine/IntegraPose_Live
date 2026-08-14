@@ -129,6 +129,11 @@ Open **Settings > Annotation appearance > ROI name labels** to choose **Off**,
 the colored outline and ROI analytics remain active. Each ROI receives a stable
 automatic high-contrast color, so renaming it does not change its color.
 
+Numeric class IDs are hidden in annotations by default. Turn on **Settings >
+Annotation appearance > Show numeric class IDs** when the model's zero-based
+class number is useful alongside its label. This display preference does not
+remove class IDs or names from CSV exports.
+
 | Analytics setting | Default | Meaning |
 | --- | ---: | --- |
 | Maximum frame gap | 5 frames | Missing frames that may be bridged when the same behavior appears on both sides |
@@ -196,6 +201,11 @@ Camera and selected media are processed on the device. Picker sources are
 opened read-only; imported models and selected cloud videos are copied into
 app-owned disk storage before use. Generated outputs remain in app-scoped
 storage until you choose to share them.
+
+The app does not request Android network access, and Android cloud backup is
+disabled so imported models, recordings, and scientific outputs are not
+uploaded by the app or included in app backup. Content leaves app-owned storage
+only when you explicitly use an Android share or export action.
 
 Third-party software acknowledgements, license names, and official notice links
 are available under **Settings > Legal & acknowledgements**.

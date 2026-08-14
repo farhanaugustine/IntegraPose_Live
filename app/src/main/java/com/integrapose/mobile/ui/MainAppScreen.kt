@@ -206,6 +206,7 @@ fun MainAppScreen(viewModel: MainViewModel) {
                     onBoundingBoxColorChange = viewModel::setBoundingBoxColor,
                     onKeypointColorChange = viewModel::setKeypointColor,
                     onRoiLabelSizeChange = viewModel::setRoiLabelSize,
+                    onShowClassIndexChange = viewModel::setShowClassIndex,
                     onSkeletonConnectionsChange = viewModel::setSkeletonConnections,
                     onTrackerConfigChange = viewModel::setTrackerConfig
                 )

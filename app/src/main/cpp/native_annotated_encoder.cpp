@@ -771,6 +771,8 @@ bool draw_annotations_i420(
     const std::vector<OverlayRoi>& rois,
     const AnnotationColors& colors,
     const std::vector<SkeletonEdge>& skeleton_edges,
+    const std::vector<std::string>& class_names,
+    bool show_class_index,
     int roi_label_size,
     std::string& error
 ) {
@@ -976,26 +978,37 @@ bool draw_annotations_i420(
             );
         }
 
-        char label_buffer[96]{};
+        std::string label;
+        const auto append_label_part = [&label](const std::string& value) {
+            if (value.empty()) return;
+            if (!label.empty()) label.push_back(' ');
+            label.append(value);
+        };
+        char label_buffer[32]{};
         if (detection.track_id >= 0) {
             std::snprintf(
                 label_buffer,
                 sizeof(label_buffer),
-                "T%d C%d %.2f",
-                detection.track_id,
-                detection.class_index,
-                detection.confidence
+                "T%d",
+                detection.track_id
             );
-        } else {
+            append_label_part(label_buffer);
+        }
+        if (show_class_index) {
             std::snprintf(
                 label_buffer,
                 sizeof(label_buffer),
-                "C%d %.2f",
-                detection.class_index,
-                detection.confidence
+                "#%d",
+                detection.class_index
             );
+            append_label_part(label_buffer);
         }
-        const std::string label(label_buffer);
+        if (detection.class_index >= 0 &&
+            static_cast<size_t>(detection.class_index) < class_names.size()) {
+            append_label_part(class_names[static_cast<size_t>(detection.class_index)]);
+        }
+        std::snprintf(label_buffer, sizeof(label_buffer), "%.2f", detection.confidence);
+        append_label_part(label_buffer);
         const int label_width =
             static_cast<int>(label.size()) * 6 * font_scale + 6;
         const int label_height = 7 * font_scale + 6;

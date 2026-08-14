@@ -9,6 +9,21 @@ class AnnotationStyleTest {
     fun defaultUsesSmallRoiLabels() {
         assertEquals(RoiLabelSize.SMALL, AnnotationStyle.Default.roiLabelSize)
         assertEquals(1, AnnotationStyle.Default.roiLabelSize.nativeSizeCode)
+        assertEquals(false, AnnotationStyle.Default.showClassIndex)
+    }
+
+    @Test
+    fun numericClassIndexIsIncludedOnlyWhenEnabled() {
+        val detection = DetectionResult(
+            classIndex = 2,
+            className = "grooming",
+            confidence = 0.91f,
+            box = BoundingBox(0f, 0f, 10f, 10f),
+            trackId = 4
+        )
+
+        assertEquals("T4 grooming 0.91", formatDetectionLabel(detection, false))
+        assertEquals("T4 #2 grooming 0.91", formatDetectionLabel(detection, true))
     }
 
     @Test

@@ -28,6 +28,19 @@ class IoUTrackerTest {
     }
 
     @Test
+    fun oneTrackCannotBeAssignedToTwoDetectionsInTheSameFrame() {
+        val tracker = IoUTracker()
+        tracker.update(listOf(detection(0, 10f)), 0)
+
+        val detections = tracker.update(
+            listOf(detection(0, 11f), detection(0, 12f)),
+            1
+        )
+
+        assertNotEquals(detections[0].trackId, detections[1].trackId)
+    }
+
+    @Test
     fun lostTrackBufferKeepsIdentityUntilConfiguredFrameLimit() {
         val tracker = IoUTracker(IoUTrackerConfig(maxMissingFrames = 2))
         val firstId = tracker.update(listOf(detection(0, 10f)), 0).single().trackId

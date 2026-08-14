@@ -6,7 +6,7 @@ IntegraPose Live - User Agreement
 By tapping Accept, you agree to all terms below.
 
 1. Device Permissions and Data
-- This app requests camera access for live inference and optional microphone access for raw live recordings.
+- This app requests camera access for live inference. Raw live recordings do not capture audio.
 - Model, image, and video files are accessed only when you select them with Android's system file picker. Generated outputs use app-scoped storage until you choose to share them.
 
 2. User-Supplied Models and Media

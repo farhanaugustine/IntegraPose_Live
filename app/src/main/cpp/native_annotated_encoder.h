@@ -106,6 +106,8 @@ bool draw_annotations_i420(
     const std::vector<OverlayRoi>& rois,
     const AnnotationColors& colors,
     const std::vector<SkeletonEdge>& skeleton_edges,
+    const std::vector<std::string>& class_names,
+    bool show_class_index,
     int roi_label_size,
     std::string& error
 );

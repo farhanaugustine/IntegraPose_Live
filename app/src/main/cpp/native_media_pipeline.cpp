@@ -611,6 +611,7 @@ Java_com_integrapose_mobile_offline_NativeMediaPipeline_nativeBenchmarkNcnn(
     jint max_frames,
     jint requested_frame_stride,
     jint requested_class_count,
+    jobjectArray class_names_value,
     jboolean is_pose_value,
     jfloat confidence_threshold_value,
     jfloat iou_threshold_value,
@@ -619,6 +620,7 @@ Java_com_integrapose_mobile_offline_NativeMediaPipeline_nativeBenchmarkNcnn(
     jint coordinate_format_value,
     jint box_color_argb_value,
     jint keypoint_color_argb_value,
+    jboolean show_class_index_value,
     jintArray skeleton_connections_value,
     jfloatArray roi_coordinates_value,
     jobjectArray roi_names_value,
@@ -649,6 +651,29 @@ Java_com_integrapose_mobile_offline_NativeMediaPipeline_nativeBenchmarkNcnn(
         0,
         static_cast<int>(requested_class_count)
     );
+    const jsize class_name_count = class_names_value == nullptr
+        ? 0
+        : env->GetArrayLength(class_names_value);
+    if (class_name_count != configured_class_count || class_name_count > 1000) {
+        throw_java(
+            env,
+            "java/lang/IllegalArgumentException",
+            "Class names must match the configured class count."
+        );
+        return nullptr;
+    }
+    std::vector<std::string> class_names;
+    class_names.reserve(static_cast<size_t>(class_name_count));
+    for (jsize index = 0; index < class_name_count; ++index) {
+        jstring name_value = static_cast<jstring>(
+            env->GetObjectArrayElement(class_names_value, index)
+        );
+        if (env->ExceptionCheck()) return nullptr;
+        std::string name = read_utf8(env, name_value);
+        if (name_value != nullptr) env->DeleteLocalRef(name_value);
+        if (name.size() > 64u) name.resize(64u);
+        class_names.push_back(name);
+    }
     const bool is_pose = is_pose_value == JNI_TRUE;
     const float confidence_threshold =
         static_cast<float>(confidence_threshold_value);
@@ -657,6 +682,7 @@ Java_com_integrapose_mobile_offline_NativeMediaPipeline_nativeBenchmarkNcnn(
     const int output_format = static_cast<int>(output_format_value);
     const int coordinate_format = static_cast<int>(coordinate_format_value);
     const int roi_label_size = static_cast<int>(roi_label_size_value);
+    const bool show_class_index = show_class_index_value == JNI_TRUE;
     const uint32_t box_argb = static_cast<uint32_t>(box_color_argb_value);
     const uint32_t keypoint_argb =
         static_cast<uint32_t>(keypoint_color_argb_value);
@@ -1164,6 +1190,8 @@ Java_com_integrapose_mobile_offline_NativeMediaPipeline_nativeBenchmarkNcnn(
                     overlay_rois,
                     annotation_colors,
                     skeleton_edges,
+                    class_names,
+                    show_class_index,
                     roi_label_size,
                     error
                 )) {

@@ -309,7 +309,7 @@ fun OfflineInferenceScreen(
                             if (preparingBundledVideo == "two_animal") {
                                 "Preparing two-animal video..."
                             } else {
-                                "Use two-animal MARS 20-second video"
+                                "Use internal two-subject 20-second video"
                             }
                         )
                     }
@@ -781,7 +781,7 @@ private fun DebugTandemOfflineCard() {
                 color = Color(0xFFFFD89B)
             )
             Text(
-                "Runs the bundled 20-second, two-animal clip with the private NCNN pose " +
+                "Runs an internal 20-second, two-subject clip with an internal NCNN pose " +
                     "model (detection count 2) and 32-frame temporal classifier.",
                 color = Color(0xFFD6E2F1)
             )

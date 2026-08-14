@@ -126,6 +126,10 @@ fun LiveInferenceScreen(
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     val targetRotation = LocalView.current.display?.rotation ?: Surface.ROTATION_0
+    val observedCameraGeometry = LiveCameraGeometry(
+        targetRotation = targetRotation,
+        isLandscapeViewport = isLandscape
+    )
     val activity = remember(context) { context.findActivity() }
 
     var cameraPermission by remember {
@@ -227,6 +231,10 @@ fun LiveInferenceScreen(
     var roiPreviewFrame by remember { mutableStateOf<LiveRoiPreviewFrame?>(null) }
     var showRoiEditor by remember { mutableStateOf(false) }
     var rawCaptureArmed by remember { mutableStateOf(false) }
+    var cameraGeometrySession by remember {
+        mutableStateOf(LiveCameraGeometrySession())
+    }
+    val cameraGeometry = cameraGeometrySession.effective(observedCameraGeometry)
     var rawVideoCapture by remember {
         mutableStateOf<VideoCapture<Recorder>?>(null)
     }
@@ -262,10 +270,15 @@ fun LiveInferenceScreen(
     }
 
     fun lockRecordingOrientation() {
+        // Snapshot before requesting the Activity lock. rawCaptureArmed may immediately rebind
+        // CameraX, and that rebind must not combine values from either side of the configuration
+        // transition. See docs/live_preview_fix.md.
+        cameraGeometrySession = cameraGeometrySession.lock(observedCameraGeometry)
         activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LOCKED
     }
 
     fun unlockRecordingOrientation() {
+        cameraGeometrySession = cameraGeometrySession.unlock()
         activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
     }
 
@@ -348,8 +361,8 @@ fun LiveInferenceScreen(
         rawCaptureArmed,
         ncnnTuning,
         trackerConfig,
-        targetRotation,
-        isLandscape
+        cameraGeometry.targetRotation,
+        cameraGeometry.isLandscapeViewport
     ) {
         latestOverlay = null
         val busy = AtomicBoolean(false)
@@ -358,15 +371,19 @@ fun LiveInferenceScreen(
         var lastPreviewCoordinateMatrix: Matrix? = null
         val cameraProvider = cameraProviderFuture.get()
         val sharedViewPort = ViewPort.Builder(
-            if (isLandscape) Rational(16, 9) else Rational(9, 16),
-            targetRotation
+            if (cameraGeometry.isLandscapeViewport) {
+                Rational(16, 9)
+            } else {
+                Rational(9, 16)
+            },
+            cameraGeometry.targetRotation
         )
             .setScaleType(ViewPort.FILL_CENTER)
             .build()
 
         val preview = Preview.Builder()
             .setTargetResolution(LIVE_CAMERA_TARGET_RESOLUTION)
-            .setTargetRotation(targetRotation)
+            .setTargetRotation(cameraGeometry.targetRotation)
             .build().also {
             it.surfaceProvider = previewView.surfaceProvider
         }
@@ -375,7 +392,7 @@ fun LiveInferenceScreen(
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
             .setTargetResolution(LIVE_CAMERA_TARGET_RESOLUTION)
-            .setTargetRotation(targetRotation)
+            .setTargetRotation(cameraGeometry.targetRotation)
             .build()
         val sessionRawVideoCapture = if (rawCaptureArmed) {
             val recorder = Recorder.Builder()
@@ -390,7 +407,7 @@ fun LiveInferenceScreen(
                     )
                 )
                 .build()
-                .also { it.targetRotation = targetRotation }
+                .also { it.targetRotation = cameraGeometry.targetRotation }
         } else {
             null
         }
@@ -417,7 +434,7 @@ fun LiveInferenceScreen(
                 "buffer=${imageProxy.width}x${imageProxy.height} " +
                     "crop=${imageProxy.cropRect} " +
                     "rotation=${imageProxy.imageInfo.rotationDegrees} " +
-                    "sourceMatrix=${analysisTransform?.matrix}"
+                    "sourceTransformAvailable=${analysisTransform != null}"
             } else {
                 null
             }
@@ -534,7 +551,7 @@ fun LiveInferenceScreen(
                                 "$analysisGeometry bitmap=${bitmap.width}x${bitmap.height} " +
                                     "preview=${previewView.width}x${previewView.height} " +
                                     "scaleType=${previewView.scaleType} " +
-                                    "previewMatrix=${previewTransform?.matrix} " +
+                                    "previewTransformAvailable=${previewTransform != null} " +
                                     "coordinateMatrix=$coordinateMatrix"
                             )
                         }

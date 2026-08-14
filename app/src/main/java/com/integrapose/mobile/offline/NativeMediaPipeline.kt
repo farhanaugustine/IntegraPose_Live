@@ -437,6 +437,7 @@ object NativeMediaPipeline {
                 maxFrames = maxFrames,
                 frameStride = frameStride,
                 classCount = model.classNames.size,
+                classNames = model.classNames.toTypedArray(),
                 isPose = model.type == ModelType.POSE,
                 confThreshold = model.confThreshold,
                 iouThreshold = model.iouThreshold,
@@ -445,6 +446,7 @@ object NativeMediaPipeline {
                 coordinateFormat = model.coordinateFormat.ordinal,
                 boxColorArgb = annotationStyle.boxArgb,
                 keypointColorArgb = annotationStyle.keypointArgb,
+                showClassIndex = annotationStyle.showClassIndex,
                 skeletonConnections = model.skeletonConnections.flatMap {
                     listOf(it.startIndex, it.endIndex)
                 }.toIntArray(),
@@ -777,6 +779,7 @@ object NativeMediaPipeline {
         maxFrames: Int,
         frameStride: Int,
         classCount: Int,
+        classNames: Array<String>,
         isPose: Boolean,
         confThreshold: Float,
         iouThreshold: Float,
@@ -785,6 +788,7 @@ object NativeMediaPipeline {
         coordinateFormat: Int,
         boxColorArgb: Int,
         keypointColorArgb: Int,
+        showClassIndex: Boolean,
         skeletonConnections: IntArray,
         roiCoordinates: FloatArray,
         roiNames: Array<String>,
