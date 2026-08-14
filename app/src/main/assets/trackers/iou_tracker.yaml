@@ -1,0 +1,6 @@
+# Defaults for the lightweight class-agnostic IoU tracker.
+tracker_type: iou
+minimum_confidence: 0.10
+new_track_confidence: 0.25
+match_iou: 0.30
+max_missing_frames: 30

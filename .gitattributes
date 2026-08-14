@@ -1,2 +1,20 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Keep public source consistent across Windows, macOS, and Linux.
+# This repository-level rule overrides a user's global core.autocrlf setting.
+* text=auto eol=lf
+
+# Windows scripts are tested with LF and remain stable in the repository.
+*.bat text eol=lf
+*.ps1 text eol=lf
+gradlew text eol=lf
+
+# Never apply text conversion to packaged binary dependencies or media.
+*.a binary
+*.jar binary
+*.png binary
+*.mp4 binary
+
+# Preserve the official prebuilt NCNN SDK byte-for-byte. Keep only its
+# repository documentation as normalized text.
+third_party/ncnn/** -text
+third_party/ncnn/README.md text eol=lf
+third_party/ncnn/LICENSE.txt text eol=lf

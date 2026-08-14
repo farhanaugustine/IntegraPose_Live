@@ -1,0 +1,36 @@
+# Android Studio and Gradle
+.gradle/
+.idea/
+.kotlin/
+**/build/
+**/.cxx/
+.externalNativeBuild/
+captures/
+*.iml
+
+# Machine-local Android configuration
+local.properties
+
+# Signing material must never be committed
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+
+# Generated packages and logs
+*.apk
+*.aab
+*.ap_
+*.log
+*.sha256
+SHA256SUMS*
+
+# Private R&D and local validation data
+models_videos/
+emulator_outputs/
+backup/
+app/src/debug/assets/
+
+# Operating-system files
+.DS_Store
+Thumbs.db

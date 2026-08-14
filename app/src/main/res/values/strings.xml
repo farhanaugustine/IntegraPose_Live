@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">IntegraPose Live</string>
+    <string name="brand_tagline">On-device pose, tracking, and behavior analytics</string>
+    <string name="brand_animation_description">IntegraPose Live. On-device pose, tracking, and behavior analytics.</string>
+</resources>
