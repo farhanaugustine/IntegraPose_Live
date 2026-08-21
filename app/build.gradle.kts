@@ -19,11 +19,14 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 1
-        versionName = "1.0.0"
+        versionName = "v.0.1.rc1"
 
         buildConfigField("boolean", "BUNDLED_TEST_KIT", "false")
+        buildConfigField("boolean", "PLAY_SPLASH_VIDEO", "true")
         buildConfigField("boolean", "START_ON_BENCHMARK", "false")
         buildConfigField("boolean", "REQUEST_SENSORS_AFTER_AGREEMENT", "true")
+        buildConfigField("boolean", "POSTPROCESS_LIVE_ANNOTATED_VIDEO", "true")
+        buildConfigField("boolean", "MODEL_SCOPED_PIPELINE_AUTOTUNE", "true")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -128,7 +131,13 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("androidx.documentfile:documentfile:1.0.1")
 
+    implementation("androidx.media3:media3-transformer:1.7.1")
+    implementation("androidx.media3:media3-effect:1.7.1")
+    implementation("androidx.media3:media3-common:1.7.1")
+
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
     debugImplementation(composeBom)
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")

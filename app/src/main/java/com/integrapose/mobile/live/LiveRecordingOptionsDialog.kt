@@ -54,6 +54,19 @@ data class LiveRecordingOptions(
             classBouts || roiVisits
 }
 
+internal fun LiveRecordingOptions.requiresRawMaster(
+    postprocessAnnotatedVideo: Boolean =
+        com.integrapose.mobile.BuildConfig.POSTPROCESS_LIVE_ANNOTATED_VIDEO
+): Boolean =
+    rawVideo || (
+        postprocessAnnotatedVideo &&
+            annotatedVideo
+        )
+
+internal fun shouldFinalizeMetricsConcurrently(
+    postprocessAnnotatedVideo: Boolean
+): Boolean = postprocessAnnotatedVideo
+
 @Composable
 fun LiveRecordingOptionsDialog(
     modelType: ModelType,

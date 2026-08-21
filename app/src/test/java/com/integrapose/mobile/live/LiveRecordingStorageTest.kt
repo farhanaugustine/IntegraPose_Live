@@ -51,4 +51,25 @@ class LiveRecordingStorageTest {
             LiveRecordingStorage.estimatedRequiredBytes(tooLong)
         )
     }
+
+    @Test
+    fun `SD raw recording reserves less storage than HD`() {
+        val options = LiveRecordingOptions(
+            plannedDurationMinutes = 30,
+            rawVideo = true,
+            annotatedVideo = false,
+            detectionCsv = false
+        )
+
+        val hd = LiveRecordingStorage.estimatedRequiredBytes(
+            options,
+            LiveRawVideoQuality.HD_720P
+        )
+        val sd = LiveRecordingStorage.estimatedRequiredBytes(
+            options,
+            LiveRawVideoQuality.SD_480P
+        )
+
+        assertTrue(sd < hd)
+    }
 }

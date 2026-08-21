@@ -20,10 +20,11 @@ internal object LiveRecordingStorage {
 
     fun requireStartCapacity(
         context: Context,
-        options: LiveRecordingOptions
+        options: LiveRecordingOptions,
+        rawVideoQuality: LiveRawVideoQuality = LiveRawVideoQuality.Default
     ): LiveRecordingStorageBudget {
         val available = availableBytes(context)
-        val required = estimatedRequiredBytes(options)
+        val required = estimatedRequiredBytes(options, rawVideoQuality)
         require(available >= required) {
             "Not enough app storage for this recording plan. " +
                 "Required ${formatBytes(required)}; available ${formatBytes(available)}. " +
@@ -34,11 +35,14 @@ internal object LiveRecordingStorage {
 
     fun availableBytes(context: Context): Long = recordingRoot(context).usableSpace
 
-    fun estimatedRequiredBytes(options: LiveRecordingOptions): Long {
+    fun estimatedRequiredBytes(
+        options: LiveRecordingOptions,
+        rawVideoQuality: LiveRawVideoQuality = LiveRawVideoQuality.Default
+    ): Long {
         val minutes = options.plannedDurationMinutes.coerceIn(0, MAX_PLANNED_MINUTES)
         if (minutes == 0) return START_RESERVE_BYTES
         var bitsPerSecond = 0L
-        if (options.rawVideo) bitsPerSecond += RAW_VIDEO_BITS_PER_SECOND
+        if (options.rawVideo) bitsPerSecond += rawVideoQuality.estimatedBitsPerSecond
         if (options.annotatedVideo) bitsPerSecond += ANNOTATED_VIDEO_BITS_PER_SECOND
         if (options.detectionCsv || options.classBouts || options.roiVisits) {
             bitsPerSecond += DATA_BITS_PER_SECOND

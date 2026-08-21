@@ -60,6 +60,42 @@ class LiveRoiViewportTest {
         assertEquals(null, viewport(0, false).toEditorRoi(outside))
     }
 
+    @Test
+    fun portraitRegionMapsIntoLandscapeThroughCanonicalCameraCoordinates() {
+        val portrait = LiveRoiViewport(
+            sourceWidth = 1280,
+            sourceHeight = 720,
+            cropLeft = 0,
+            cropTop = 0,
+            cropRight = 1280,
+            cropBottom = 720,
+            rotationDegrees = 90,
+            mirrorHorizontally = false
+        )
+        val landscape = portrait.copy(rotationDegrees = 0)
+        val portraitRegion = BehaviorRoi(
+            id = "cross_orientation",
+            name = "Cross orientation",
+            left = 0.2f,
+            top = 0.3f,
+            right = 0.4f,
+            bottom = 0.6f
+        )
+
+        val canonical = portrait.toSourceRoi(portraitRegion)
+        val landscapeRegion = requireNotNull(landscape.toEditorRoi(canonical))
+
+        assertRoi(canonical, 0.3f, 0.6f, 0.6f, 0.8f)
+        assertRoi(landscapeRegion, 0.3f, 0.6f, 0.6f, 0.8f)
+        assertRoi(
+            portrait.toEditorRoi(landscape.toSourceRoi(landscapeRegion))!!,
+            portraitRegion.left,
+            portraitRegion.top,
+            portraitRegion.right,
+            portraitRegion.bottom
+        )
+    }
+
     private fun viewport(rotation: Int, mirror: Boolean) = LiveRoiViewport(
         sourceWidth = 200,
         sourceHeight = 100,

@@ -12,6 +12,10 @@ import androidx.datastore.preferences.preferencesDataStore
 import com.integrapose.mobile.inference.AnnotationColorPreset
 import com.integrapose.mobile.inference.AnnotationStyle
 import com.integrapose.mobile.inference.RoiLabelSize
+import com.integrapose.mobile.live.LiveOverlayRefreshRate
+import com.integrapose.mobile.live.LivePreviewQuality
+import com.integrapose.mobile.live.LivePreviewRenderer
+import com.integrapose.mobile.live.LiveRawVideoQuality
 import com.integrapose.mobile.tracking.IoUTrackerConfig
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
@@ -35,6 +39,10 @@ class AppDataStore(private val context: Context) {
     private val trackerMatchIoUKey = floatPreferencesKey("tracker_match_iou")
     private val trackerMaxMissingFramesKey =
         intPreferencesKey("tracker_max_missing_frames")
+    private val liveRawVideoQualityKey = stringPreferencesKey("live_raw_video_quality")
+    private val livePreviewQualityKey = stringPreferencesKey("live_preview_quality")
+    private val livePreviewRendererKey = stringPreferencesKey("live_preview_renderer")
+    private val liveOverlayRefreshRateKey = stringPreferencesKey("live_overlay_refresh_rate")
 
     val agreementAcceptedFlow: Flow<Boolean> = context.dataStore.data
         .catch { exception ->
@@ -105,6 +113,42 @@ class AppDataStore(private val context: Context) {
             ).sanitized()
         }
 
+    val liveRawVideoQualityFlow: Flow<LiveRawVideoQuality> = context.dataStore.data
+        .catch { exception ->
+            if (exception is IOException) {
+                emit(emptyPreferences())
+            } else {
+                throw exception
+            }
+        }
+        .map { preferences ->
+            LiveRawVideoQuality.fromStoredName(preferences[liveRawVideoQualityKey])
+        }
+
+    val livePreviewQualityFlow: Flow<LivePreviewQuality> = context.dataStore.data
+        .catch { exception ->
+            if (exception is IOException) emit(emptyPreferences()) else throw exception
+        }
+        .map { preferences ->
+            LivePreviewQuality.fromStoredName(preferences[livePreviewQualityKey])
+        }
+
+    val livePreviewRendererFlow: Flow<LivePreviewRenderer> = context.dataStore.data
+        .catch { exception ->
+            if (exception is IOException) emit(emptyPreferences()) else throw exception
+        }
+        .map { preferences ->
+            LivePreviewRenderer.fromStoredName(preferences[livePreviewRendererKey])
+        }
+
+    val liveOverlayRefreshRateFlow: Flow<LiveOverlayRefreshRate> = context.dataStore.data
+        .catch { exception ->
+            if (exception is IOException) emit(emptyPreferences()) else throw exception
+        }
+        .map { preferences ->
+            LiveOverlayRefreshRate.fromStoredName(preferences[liveOverlayRefreshRateKey])
+        }
+
     suspend fun isAgreementAccepted(): Boolean = agreementAcceptedFlow.first()
 
     suspend fun setAgreementAccepted(accepted: Boolean) {
@@ -139,6 +183,30 @@ class AppDataStore(private val context: Context) {
             prefs[trackerNewTrackConfidenceKey] = sanitized.newTrackConfidence
             prefs[trackerMatchIoUKey] = sanitized.matchIoU
             prefs[trackerMaxMissingFramesKey] = sanitized.maxMissingFrames
+        }
+    }
+
+    suspend fun setLiveRawVideoQuality(quality: LiveRawVideoQuality) {
+        context.dataStore.edit { prefs ->
+            prefs[liveRawVideoQualityKey] = quality.storageName
+        }
+    }
+
+    suspend fun setLivePreviewQuality(quality: LivePreviewQuality) {
+        context.dataStore.edit { prefs ->
+            prefs[livePreviewQualityKey] = quality.storageName
+        }
+    }
+
+    suspend fun setLivePreviewRenderer(renderer: LivePreviewRenderer) {
+        context.dataStore.edit { prefs ->
+            prefs[livePreviewRendererKey] = renderer.storageName
+        }
+    }
+
+    suspend fun setLiveOverlayRefreshRate(rate: LiveOverlayRefreshRate) {
+        context.dataStore.edit { prefs ->
+            prefs[liveOverlayRefreshRateKey] = rate.storageName
         }
     }
 }

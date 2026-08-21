@@ -38,6 +38,7 @@ class NcnnExecutionProfileStore(context: Context) {
                 ),
                 benchmarked = preferences.getBoolean("$prefix.benchmarked", true),
                 streamingThreads = preferences.getInt("$prefix.streaming_threads", 1),
+                streamingWorkers = preferences.getInt("$prefix.streaming_workers", 1),
                 streamingBackend = NativeNcnnBackend.valueOf(
                     requireNotNull(
                         preferences.getString("$prefix.streaming_backend", null)
@@ -55,7 +56,9 @@ class NcnnExecutionProfileStore(context: Context) {
                     PARITY_PASSED -> true
                     PARITY_FAILED -> false
                     else -> null
-                }
+                },
+                livePreviewRendererStorageName =
+                    preferences.getString("$prefix.live_preview_renderer", null)
             )
         }.getOrNull()
     }
@@ -78,6 +81,7 @@ class NcnnExecutionProfileStore(context: Context) {
             )
             .putBoolean("$prefix.benchmarked", profile.benchmarked)
             .putInt("$prefix.streaming_threads", profile.streamingThreads)
+            .putInt("$prefix.streaming_workers", profile.streamingWorkers)
             .putString("$prefix.streaming_backend", profile.streamingBackend.name)
             .putLong(
                 "$prefix.streaming_pipeline_fps",
@@ -92,7 +96,31 @@ class NcnnExecutionProfileStore(context: Context) {
                     null -> PARITY_UNKNOWN
                 }
             )
+            .putString(
+                "$prefix.live_preview_renderer",
+                profile.livePreviewRendererStorageName
+            )
             .apply()
+    }
+
+    fun clearModel(modelId: String) {
+        val prefixes = NcnnProfileTarget.entries.map {
+            "${it.storageName}.$modelId:"
+        }
+        val editor = preferences.edit()
+        preferences.all.keys
+            .filter { key -> prefixes.any(key::startsWith) }
+            .forEach(editor::remove)
+        editor.apply()
+    }
+
+    fun clear(profileKey: String, target: NcnnProfileTarget) {
+        val prefix = keyPrefix(profileKey, target)
+        val editor = preferences.edit()
+        preferences.all.keys
+            .filter { it.startsWith("$prefix.") }
+            .forEach(editor::remove)
+        editor.apply()
     }
 
     private fun keyPrefix(

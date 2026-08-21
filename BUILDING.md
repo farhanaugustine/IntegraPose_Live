@@ -6,7 +6,7 @@ package after installing the app.
 
 ## Requirements
 
-- Android Studio with its bundled JDK 17
+- JDK 17, selected explicitly as Android Studio's Gradle JDK
 - Android SDK Platform 35
 - Android NDK `29.0.14206865`
 - CMake `3.22.1`
@@ -16,6 +16,12 @@ Android Studio normally offers to install missing SDK, NDK, and CMake
 components during project sync. `local.properties` is intentionally excluded
 because it contains the Android SDK path for one computer; Android Studio
 creates it locally.
+
+Do not assume the JBR bundled with the currently installed Android Studio is
+JDK 17. Newer Android Studio releases may bundle a newer JBR that this
+Gradle/Kotlin combination cannot run. In Android Studio, set **Settings > Build
+Tools > Gradle > Gradle JDK** to a JDK 17 installation. For command-line builds,
+set `JAVA_HOME` to the same JDK and confirm `./gradlew --version` reports JVM 17.
 
 ## Android Studio
 
@@ -35,6 +41,7 @@ On Windows:
 
 ```powershell
 .\gradlew.bat :app:testDebugUnitTest
+.\gradlew.bat :app:assembleDebugAndroidTest
 .\gradlew.bat :app:assembleDebug
 .\gradlew.bat :app:assembleRelease
 ```
@@ -44,9 +51,14 @@ On macOS or Linux:
 ```bash
 chmod +x gradlew
 ./gradlew :app:testDebugUnitTest
+./gradlew :app:assembleDebugAndroidTest
 ./gradlew :app:assembleDebug
 ./gradlew :app:assembleRelease
 ```
+
+With an emulator or test device connected, run
+`./gradlew :app:connectedDebugAndroidTest`. The GitHub Actions workflow runs the
+unit, lint, build, and connected-device gates for pushes and pull requests.
 
 Debug APKs are written under `app/build/outputs/apk/debug/`. Release APKs are
 unsigned unless you configure your own signing key. Use Android Studio's

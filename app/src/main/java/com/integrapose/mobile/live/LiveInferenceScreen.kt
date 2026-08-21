@@ -14,6 +14,7 @@ import android.os.SystemClock
 import android.util.Range
 import android.util.Rational
 import android.util.Log
+import android.util.Size
 import android.view.Surface
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -30,6 +31,7 @@ import androidx.camera.view.transform.CoordinateTransform
 import androidx.camera.view.transform.ImageProxyTransformFactory
 import androidx.camera.video.Quality
 import androidx.camera.video.QualitySelector
+import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.Recorder
 import androidx.camera.video.VideoCapture
 import androidx.compose.foundation.background
@@ -56,6 +58,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -64,6 +67,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -88,23 +92,36 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.integrapose.mobile.BuildConfig
 import com.integrapose.mobile.inference.FrameInferenceResult
 import com.integrapose.mobile.inference.AnnotationStyle
+import com.integrapose.mobile.inference.ConvertedImageProxyBitmap
 import com.integrapose.mobile.inference.OverlayCalibration
 import com.integrapose.mobile.inference.OverlayRenderer
+import com.integrapose.mobile.inference.OrientedCropGeometry
 import com.integrapose.mobile.inference.NcnnRuntimeTuning
 import com.integrapose.mobile.inference.ModelInferenceRunner
+import com.integrapose.mobile.inference.mapToOrientedCrop
 import com.integrapose.mobile.analytics.BehaviorRoi
 import com.integrapose.mobile.export.publishVideoToMediaStore
 import com.integrapose.mobile.export.shareExport
 import com.integrapose.mobile.export.viewExport
 import com.integrapose.mobile.model.InferenceModelConfig
+import com.integrapose.mobile.model.ModelRuntime
+import com.integrapose.mobile.offline.NcnnExecutionProfile
+import com.integrapose.mobile.offline.NativeNcnnBackend
+import com.integrapose.mobile.offline.NcnnProfileSelection
 import com.integrapose.mobile.offline.RoiEditorDialog
 import com.integrapose.mobile.tracking.IoUTracker
 import com.integrapose.mobile.tracking.IoUTrackerConfig
 import com.integrapose.mobile.ui.AdaptiveAlertDialog
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.util.Locale
 import java.util.concurrent.Executors
@@ -116,9 +133,17 @@ fun LiveInferenceScreen(
     selectedModel: InferenceModelConfig?,
     runner: ModelInferenceRunner,
     ncnnTuning: NcnnRuntimeTuning?,
+    ncnnWorkers: Int,
+    ncnnVulkanParityPassed: Boolean?,
     annotationStyle: AnnotationStyle,
     trackerConfig: IoUTrackerConfig,
-    onRecordingBusyChange: (Boolean) -> Unit
+    rawVideoQuality: LiveRawVideoQuality,
+    previewQuality: LivePreviewQuality,
+    previewRenderer: LivePreviewRenderer,
+    overlayRefreshRate: LiveOverlayRefreshRate,
+    onRecordingBusyChange: (Boolean) -> Unit,
+    onImmersiveModalChange: (Boolean) -> Unit,
+    onLiveProfileSelected: (NcnnExecutionProfile) -> Unit
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -131,6 +156,14 @@ fun LiveInferenceScreen(
         isLandscapeViewport = isLandscape
     )
     val activity = remember(context) { context.findActivity() }
+    var benchmarkRendererOverride by remember {
+        mutableStateOf<LivePreviewRenderer?>(null)
+    }
+    val effectivePreviewRenderer = if (BuildConfig.MODEL_SCOPED_PIPELINE_AUTOTUNE) {
+        benchmarkRendererOverride ?: previewRenderer
+    } else {
+        previewRenderer
+    }
 
     var cameraPermission by remember {
         mutableStateOf(
@@ -186,9 +219,14 @@ fun LiveInferenceScreen(
         return
     }
 
-    val previewView = remember {
+    val previewView = remember(effectivePreviewRenderer) {
         PreviewView(context).apply {
-            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+            implementationMode = when (effectivePreviewRenderer) {
+                LivePreviewRenderer.COMPATIBLE ->
+                    PreviewView.ImplementationMode.COMPATIBLE
+                LivePreviewRenderer.PERFORMANCE ->
+                    PreviewView.ImplementationMode.PERFORMANCE
+            }
             scaleType = PreviewView.ScaleType.FIT_CENTER
         }
     }
@@ -198,6 +236,21 @@ fun LiveInferenceScreen(
     val annotatedRecorder = remember { AnnotatedVideoRecorder(context) }
     val rawRecorder = remember { RawCameraRecorder(context) }
     val metricsRecorder = remember { LiveMetricsRecorder(context) }
+    val annotationTimelineRecorder = remember {
+        LiveAnnotationTimelineRecorder(context)
+    }
+    val annotatedPostProcessor = remember {
+        createLiveAnnotatedVideoProcessor(context)
+    }
+    val liveWorkerPool = remember(runner) {
+        if (BuildConfig.POSTPROCESS_LIVE_ANNOTATED_VIDEO) {
+            LiveInferenceWorkerPool(runner)
+        } else {
+            null
+        }
+    }
+    val liveBenchmarkCollector = remember { LiveCameraBenchmarkCollector() }
+    val liveBenchmarkAnalysisPaused = remember { AtomicBoolean(false) }
     val roiPreviewRequested = remember { AtomicBoolean(false) }
     val calibrationStore = remember { LiveOverlayCalibrationStore(context) }
     val imageTransformFactory = remember {
@@ -216,6 +269,9 @@ fun LiveInferenceScreen(
     var isRecording by remember { mutableStateOf(false) }
     var isPreparingRecording by remember { mutableStateOf(false) }
     var isFinalizingRecording by remember { mutableStateOf(false) }
+    var postProcessProgress by remember {
+        mutableStateOf<LivePostProcessProgress?>(null)
+    }
     var trackingEnabled by rememberSaveable { mutableStateOf(true) }
     var lensFacing by remember { mutableIntStateOf(CameraSelector.LENS_FACING_BACK) }
     var showCalibration by rememberSaveable { mutableStateOf(false) }
@@ -228,6 +284,8 @@ fun LiveInferenceScreen(
     var recordingOptions by remember { mutableStateOf(LiveRecordingOptions()) }
     var showRecordingOptions by remember { mutableStateOf(false) }
     var rois by remember { mutableStateOf<List<BehaviorRoi>>(emptyList()) }
+    var orientedRois by remember { mutableStateOf<List<BehaviorRoi>>(emptyList()) }
+    var recordingRois by remember { mutableStateOf<List<BehaviorRoi>>(emptyList()) }
     var roiPreviewFrame by remember { mutableStateOf<LiveRoiPreviewFrame?>(null) }
     var showRoiEditor by remember { mutableStateOf(false) }
     var rawCaptureArmed by remember { mutableStateOf(false) }
@@ -252,14 +310,40 @@ fun LiveInferenceScreen(
     var boutCsvPath by remember { mutableStateOf<String?>(null) }
     var roiCsvPath by remember { mutableStateOf<String?>(null) }
     var statusText by remember { mutableStateOf<String?>(null) }
+    var isLiveBenchmarking by remember { mutableStateOf(false) }
+    var isBenchmarkRecording by remember { mutableStateOf(false) }
+    var liveBenchmarkJob by remember { mutableStateOf<Job?>(null) }
+    var liveBenchmarkResult by remember {
+        mutableStateOf<LiveCameraBenchmarkResult?>(null)
+    }
+    var pendingLiveBenchmarkProfile by remember {
+        mutableStateOf<NcnnExecutionProfile?>(null)
+    }
+    var benchmarkTuningOverride by remember {
+        mutableStateOf<NcnnRuntimeTuning?>(null)
+    }
+    var benchmarkWorkersOverride by remember { mutableStateOf<Int?>(null) }
 
     val currentRecordingState by rememberUpdatedState(isRecording)
     val currentFinalizingState by rememberUpdatedState(isFinalizingRecording)
     val currentOptions by rememberUpdatedState(recordingOptions)
     val currentTrackingState by rememberUpdatedState(trackingEnabled)
     val currentAnnotationStyle by rememberUpdatedState(annotationStyle)
+    val currentOverlayRefreshRate by rememberUpdatedState(overlayRefreshRate)
     val currentRois by rememberUpdatedState(rois)
     val currentRecordingBusyCallback by rememberUpdatedState(onRecordingBusyChange)
+    val currentImmersiveModalCallback by rememberUpdatedState(onImmersiveModalChange)
+    val currentLiveProfileSelected by rememberUpdatedState(onLiveProfileSelected)
+    val currentInferenceTuning by rememberUpdatedState(
+        benchmarkTuningOverride ?: ncnnTuning
+    )
+    val currentInferenceWorkers by rememberUpdatedState(
+        if (BuildConfig.POSTPROCESS_LIVE_ANNOTATED_VIDEO) {
+            (benchmarkWorkersOverride ?: ncnnWorkers).coerceIn(1, 2)
+        } else {
+            1
+        }
+    )
     val liveModel = selectedModel.copy(detectionCount = liveDetectionCount)
     val currentModelConfig by rememberUpdatedState(liveModel)
 
@@ -300,6 +384,11 @@ fun LiveInferenceScreen(
         csvPath = null
         boutCsvPath = null
         roiCsvPath = null
+        recordingRois = if (BuildConfig.MODEL_SCOPED_PIPELINE_AUTOTUNE) {
+            orientedRois
+        } else {
+            rois
+        }
         runCatching {
             metricsRecorder.start(
                 modelType = selectedModel.type,
@@ -311,12 +400,18 @@ fun LiveInferenceScreen(
                     assignTrackIds = trackingEnabled ||
                         options.classBouts || options.roiVisits
                 ),
-                rois = rois,
+                rois = recordingRois,
                 boutSettings = options.boutSettings,
                 roiSettings = options.roiSettings,
                 trackerConfig = trackerConfig
             )
-            if (options.rawVideo) {
+            if (
+                BuildConfig.POSTPROCESS_LIVE_ANNOTATED_VIDEO &&
+                options.annotatedVideo
+            ) {
+                annotationTimelineRecorder.start()
+            }
+            if (options.requiresRawMaster()) {
                 rawRecorder.start(
                     requireNotNull(capture) {
                         "The raw camera recorder is not ready."
@@ -328,15 +423,24 @@ fun LiveInferenceScreen(
             isPreparingRecording = false
             currentRecordingBusyCallback(true)
             statusText = when {
+                BuildConfig.POSTPROCESS_LIVE_ANNOTATED_VIDEO &&
+                    options.annotatedVideo ->
+                    "Recording the ${rawVideoQuality.displayName} 30 FPS raw master and " +
+                        "inference timeline. " +
+                        "The annotated derivative will be built after Stop."
                 options.rawVideo && options.annotatedVideo ->
-                    "Recording raw + annotated video (30 FPS maximum)."
-                options.rawVideo -> "Recording raw source video (30 FPS maximum)."
+                    "Recording ${rawVideoQuality.displayName} raw + annotated video " +
+                        "(30 FPS maximum)."
+                options.rawVideo ->
+                    "Recording ${rawVideoQuality.displayName} raw source video " +
+                        "(30 FPS maximum)."
                 options.annotatedVideo ->
                     "Recording annotated inference (30 FPS maximum)."
                 else -> "Recording inference data at up to 30 FPS. Analytics run after Stop."
             }
         }.onFailure { error ->
             metricsRecorder.close()
+            annotationTimelineRecorder.close()
             rawRecorder.close()
             startRequested = false
             rawCaptureArmed = false
@@ -359,6 +463,9 @@ fun LiveInferenceScreen(
         selectedModel.id,
         lensFacing,
         rawCaptureArmed,
+        rawVideoQuality,
+        previewQuality,
+        previewView,
         ncnnTuning,
         trackerConfig,
         cameraGeometry.targetRotation,
@@ -367,7 +474,11 @@ fun LiveInferenceScreen(
         latestOverlay = null
         val busy = AtomicBoolean(false)
         val tracker = IoUTracker(trackerConfig)
+        val trackerLock = Any()
         var inferenceFrameIndex = 0
+        var lastPublishedTimestampUs = Long.MIN_VALUE
+        var lastOverlayTimestampUs = Long.MIN_VALUE
+        val overlayCadence = LiveOverlayCadence()
         var lastPreviewCoordinateMatrix: Matrix? = null
         val cameraProvider = cameraProviderFuture.get()
         val sharedViewPort = ViewPort.Builder(
@@ -382,7 +493,7 @@ fun LiveInferenceScreen(
             .build()
 
         val preview = Preview.Builder()
-            .setTargetResolution(LIVE_CAMERA_TARGET_RESOLUTION)
+            .setTargetResolution(Size(previewQuality.width, previewQuality.height))
             .setTargetRotation(cameraGeometry.targetRotation)
             .build().also {
             it.surfaceProvider = previewView.surfaceProvider
@@ -395,8 +506,17 @@ fun LiveInferenceScreen(
             .setTargetRotation(cameraGeometry.targetRotation)
             .build()
         val sessionRawVideoCapture = if (rawCaptureArmed) {
+            val requestedQuality = when (rawVideoQuality) {
+                LiveRawVideoQuality.HD_720P -> Quality.HD
+                LiveRawVideoQuality.SD_480P -> Quality.SD
+            }
             val recorder = Recorder.Builder()
-                .setQualitySelector(QualitySelector.from(Quality.HD))
+                .setQualitySelector(
+                    QualitySelector.from(
+                        requestedQuality,
+                        FallbackStrategy.lowerQualityOrHigherThan(requestedQuality)
+                    )
+                )
                 .build()
             VideoCapture.Builder(recorder)
                 .setMirrorMode(MirrorMode.MIRROR_MODE_ON_FRONT_ONLY)
@@ -413,16 +533,42 @@ fun LiveInferenceScreen(
         }
 
         analysis.setAnalyzer(analyzerExecutor) { imageProxy ->
+            // Configuration changes must happen between inference calls. Without this gate,
+            // CameraX can immediately lease a just-released worker while the benchmark is
+            // waiting for the pool to become idle. On fast camera streams that wait can be
+            // unbounded, and changing NCNN tuning underneath an active runner can stall both
+            // analysis and the visible preview.
+            if (liveBenchmarkAnalysisPaused.get()) {
+                imageProxy.close()
+                return@setAnalyzer
+            }
+            val pipelineStartedNs = System.nanoTime()
+            val benchmarkToken = liveBenchmarkCollector.onCameraFrame()
             if (currentFinalizingState) {
+                liveBenchmarkCollector.onBusyDrop(benchmarkToken)
                 imageProxy.close()
                 return@setAnalyzer
             }
-            if (!busy.compareAndSet(false, true)) {
+            val workerLease = liveWorkerPool?.tryAcquire(currentInferenceWorkers)
+            val stableWorkerAcquired = if (liveWorkerPool == null) {
+                busy.compareAndSet(false, true)
+            } else {
+                workerLease != null
+            }
+            if (!stableWorkerAcquired) {
+                liveBenchmarkCollector.onBusyDrop(benchmarkToken)
                 imageProxy.close()
                 return@setAnalyzer
             }
+            liveBenchmarkCollector.onAccepted(
+                benchmarkToken,
+                imageProxy.width,
+                imageProxy.height
+            )
 
             val sourceTimestampUs = imageProxy.imageInfo.timestamp / 1_000L
+            val sourceBufferWidth = imageProxy.width
+            val sourceBufferHeight = imageProxy.height
             val sourceRotationDegrees = imageProxy.imageInfo.rotationDegrees
             val sourceCropRect = Rect(imageProxy.cropRect)
             val logMappingGeometry = BuildConfig.BUNDLED_TEST_KIT &&
@@ -438,37 +584,116 @@ fun LiveInferenceScreen(
             } else {
                 null
             }
-            val bitmap: android.graphics.Bitmap? = imageProxy.toBitmap()
-            imageProxy.close()
+            val conversionStartedNs = System.nanoTime()
+            val convertedBitmap = try {
+                if (BuildConfig.POSTPROCESS_LIVE_ANNOTATED_VIDEO && workerLease != null) {
+                    workerLease.convert(imageProxy)
+                } else {
+                    imageProxy.toBitmap()?.let { bitmap ->
+                        ConvertedImageProxyBitmap(
+                            bitmap = bitmap,
+                            recycleAfterUse = true,
+                            usedBulkRgbaCopy = false
+                        )
+                    }
+                }
+            } catch (error: Throwable) {
+                Log.e(LIVE_MAPPING_LOG_TAG, "Live camera RGBA conversion failed", error)
+                null
+            } finally {
+                imageProxy.close()
+            }
+            val conversionNs = System.nanoTime() - conversionStartedNs
 
-            if (bitmap == null) {
-                busy.set(false)
+            if (convertedBitmap == null) {
+                workerLease?.release() ?: busy.set(false)
                 return@setAnalyzer
             }
+            val bitmap = convertedBitmap.bitmap
+            val tuningForFrame = currentInferenceTuning
 
             scope.launch(Dispatchers.Default) {
-                runCatching {
-                    val rawInference = runner.run(
+                var measuredInference: FrameInferenceResult? = null
+                var publishedForBenchmark = false
+                var overlayPublishedForBenchmark = false
+                var trackingWriteNs = 0L
+                var uiPublishNs = 0L
+                try {
+                    runCatching {
+                    val rawInference = (workerLease?.runner ?: runner).run(
                         bitmap = bitmap,
                         config = currentModelConfig,
                         sourceTimestampUs = sourceTimestampUs,
-                        ncnnTuning = ncnnTuning
+                        ncnnTuning = tuningForFrame
                     )
-                    val inference = if (currentTrackingState) {
-                        rawInference.copy(
-                            detections = tracker.update(rawInference.detections, inferenceFrameIndex)
+                    measuredInference = rawInference
+                    val trackingWriteStartedNs = System.nanoTime()
+                    val inferencePublication = synchronized(trackerLock) {
+                        if (sourceTimestampUs <= lastPublishedTimestampUs) {
+                            null
+                        } else {
+                            lastPublishedTimestampUs = sourceTimestampUs
+                            val ordered = if (currentTrackingState) {
+                                rawInference.copy(
+                                    detections = tracker.update(
+                                        rawInference.detections,
+                                        inferenceFrameIndex
+                                    )
+                                )
+                            } else {
+                                rawInference
+                            }
+                            inferenceFrameIndex += 1
+                            val overlayDue = if (
+                                BuildConfig.MODEL_SCOPED_PIPELINE_AUTOTUNE
+                            ) {
+                                overlayCadence.shouldPublish(
+                                    sourceTimestampUs,
+                                    currentOverlayRefreshRate.maximumFps
+                                )
+                            } else {
+                                val minimumOverlayIntervalUs =
+                                    currentOverlayRefreshRate.minimumIntervalUs
+                                val due = minimumOverlayIntervalUs == 0L ||
+                                    lastOverlayTimestampUs == Long.MIN_VALUE ||
+                                    sourceTimestampUs - lastOverlayTimestampUs >=
+                                        minimumOverlayIntervalUs
+                                if (due) lastOverlayTimestampUs = sourceTimestampUs
+                                due
+                            }
+                            ordered to overlayDue
+                        }
+                    }
+                    if (inferencePublication == null) return@runCatching
+                    val inference = inferencePublication.first
+                    val overlayDue = inferencePublication.second
+                    val inferenceViewport = if (
+                        BuildConfig.MODEL_SCOPED_PIPELINE_AUTOTUNE
+                    ) {
+                        LiveRoiViewport.fromFrame(
+                            sourceWidth = sourceBufferWidth,
+                            sourceHeight = sourceBufferHeight,
+                            cropRect = sourceCropRect,
+                            rotationDegrees = sourceRotationDegrees,
+                            mirrorHorizontally = false
                         )
                     } else {
-                        rawInference
+                        null
                     }
-                    inferenceFrameIndex += 1
+                    val frameRois = inferenceViewport?.let { viewport ->
+                        currentRois.mapNotNull(viewport::toEditorRoi)
+                    } ?: currentRois
 
                     val roiSnapshot = if (
                         roiPreviewRequested.compareAndSet(true, false)
                     ) {
                         val viewport = LiveRoiViewport.fromFrame(
-                            sourceWidth = bitmap.width,
-                            sourceHeight = bitmap.height,
+                            sourceWidth = if (
+                                BuildConfig.MODEL_SCOPED_PIPELINE_AUTOTUNE
+                            ) sourceBufferWidth else bitmap.width,
+                            sourceHeight = if (
+                                BuildConfig.MODEL_SCOPED_PIPELINE_AUTOTUNE
+                            ) sourceBufferHeight else bitmap.height,
                             cropRect = sourceCropRect,
                             rotationDegrees = sourceRotationDegrees,
                             mirrorHorizontally =
@@ -478,8 +703,16 @@ fun LiveInferenceScreen(
                             bitmap = OverlayRenderer.renderOrientedCropBitmap(
                                 source = bitmap,
                                 inference = inference.copy(detections = emptyList()),
-                                cropRect = viewport.cropRect(),
-                                rotationDegrees = sourceRotationDegrees,
+                                cropRect = if (
+                                    BuildConfig.MODEL_SCOPED_PIPELINE_AUTOTUNE
+                                ) {
+                                    Rect(0, 0, bitmap.width, bitmap.height)
+                                } else {
+                                    viewport.cropRect()
+                                },
+                                rotationDegrees = if (
+                                    BuildConfig.MODEL_SCOPED_PIPELINE_AUTOTUNE
+                                ) 0 else sourceRotationDegrees,
                                 mirrorHorizontally = viewport.mirrorHorizontally
                             ),
                             viewport = viewport
@@ -491,40 +724,71 @@ fun LiveInferenceScreen(
                     if (currentRecordingState) {
                         metricsRecorder.append(rawInference)
                         if (currentOptions.annotatedVideo) {
-                            val annotated = OverlayRenderer.renderOrientedCropBitmap(
-                                source = bitmap,
-                                inference = inference,
-                                cropRect = sourceCropRect,
-                                rotationDegrees = sourceRotationDegrees,
-                                mirrorHorizontally =
-                                    lensFacing == CameraSelector.LENS_FACING_FRONT,
-                                annotationStyle = currentAnnotationStyle,
-                                skeletonConnections = selectedModel.skeletonConnections,
-                                rois = if (currentOptions.drawRoisOnAnnotatedVideo) {
-                                    currentRois
-                                } else {
-                                    emptyList()
+                            if (BuildConfig.POSTPROCESS_LIVE_ANNOTATED_VIDEO) {
+                                val safeCrop = Rect(sourceCropRect).apply {
+                                    intersect(0, 0, bitmap.width, bitmap.height)
+                                    right -= width() % 2
+                                    bottom -= height() % 2
                                 }
-                            )
-                            try {
-                                if (!annotatedRecorder.isRecording) {
-                                    annotatedRecorder.start(
-                                        width = annotated.width,
-                                        height = annotated.height,
-                                        fps = AnnotatedVideoRecorder.MAX_RECORDING_FPS
+                                if (safeCrop.width() > 0 && safeCrop.height() > 0) {
+                                    annotationTimelineRecorder.append(
+                                        inference.mapToOrientedCrop(
+                                            OrientedCropGeometry(
+                                                left = safeCrop.left,
+                                                top = safeCrop.top,
+                                                right = safeCrop.right,
+                                                bottom = safeCrop.bottom,
+                                                rotationDegrees = sourceRotationDegrees,
+                                                mirrorHorizontally =
+                                                    lensFacing ==
+                                                        CameraSelector.LENS_FACING_FRONT
+                                            )
+                                        )
                                     )
                                 }
-                                annotatedRecorder.enqueueFrame(
-                                    annotated,
-                                    sourceTimestampUs
+                            } else {
+                                val annotated = OverlayRenderer.renderOrientedCropBitmap(
+                                    source = bitmap,
+                                    inference = inference,
+                                    cropRect = sourceCropRect,
+                                    rotationDegrees = sourceRotationDegrees,
+                                    mirrorHorizontally =
+                                        lensFacing == CameraSelector.LENS_FACING_FRONT,
+                                    annotationStyle = currentAnnotationStyle,
+                                    skeletonConnections = selectedModel.skeletonConnections,
+                                    rois = if (currentOptions.drawRoisOnAnnotatedVideo) {
+                                        frameRois
+                                    } else {
+                                        emptyList()
+                                    }
                                 )
-                            } finally {
-                                annotated.recycle()
+                                try {
+                                    if (!annotatedRecorder.isRecording) {
+                                        annotatedRecorder.start(
+                                            width = annotated.width,
+                                            height = annotated.height,
+                                            fps = AnnotatedVideoRecorder.MAX_RECORDING_FPS
+                                        )
+                                    }
+                                    annotatedRecorder.enqueueFrame(
+                                        annotated,
+                                        sourceTimestampUs
+                                    )
+                                } finally {
+                                    annotated.recycle()
+                                }
                             }
                         }
                     }
 
-                    withContext(Dispatchers.Main) {
+                    val publishToScreen = overlayDue || roiSnapshot != null
+                    trackingWriteNs = System.nanoTime() - trackingWriteStartedNs
+                    if (publishToScreen) {
+                        val uiPublishStartedNs = System.nanoTime()
+                        withContext(Dispatchers.Main) {
+                        if (BuildConfig.MODEL_SCOPED_PIPELINE_AUTOTUNE) {
+                            orientedRois = frameRois
+                        }
                         roiSnapshot?.let { snapshot ->
                             roiPreviewFrame?.bitmap?.recycle()
                             roiPreviewFrame = snapshot
@@ -532,7 +796,45 @@ fun LiveInferenceScreen(
                             statusText =
                                 "Live analysis frame captured. Define regions, then save them."
                         }
-                        val coordinateMatrix = runCatching {
+                        val recordingCoordinateMatrix =
+                            if (
+                                sessionRawVideoCapture != null &&
+                                previewView.width > 0 &&
+                                previewView.height > 0
+                            ) {
+                                runCatching {
+                                    val safeCrop = Rect(sourceCropRect).apply {
+                                        intersect(0, 0, bitmap.width, bitmap.height)
+                                        right -= width() % 2
+                                        bottom -= height() % 2
+                                    }
+                                    val geometry = OrientedCropGeometry(
+                                        left = safeCrop.left,
+                                        top = safeCrop.top,
+                                        right = safeCrop.right,
+                                        bottom = safeCrop.bottom,
+                                        rotationDegrees = sourceRotationDegrees,
+                                        mirrorHorizontally =
+                                            lensFacing ==
+                                                CameraSelector.LENS_FACING_FRONT
+                                    )
+                                    Matrix().apply {
+                                        setValues(
+                                            recordingPreviewMatrixValues(
+                                                geometry = geometry,
+                                                targetWidth = previewView.width,
+                                                targetHeight = previewView.height,
+                                                fillTarget =
+                                                    previewView.scaleType ==
+                                                        PreviewView.ScaleType.FILL_CENTER
+                                            )
+                                        )
+                                    }
+                                }.getOrNull()
+                            } else {
+                                null
+                            }
+                        val coordinateMatrix = recordingCoordinateMatrix ?: runCatching {
                             val previewTransform = previewView.outputTransform
                                 ?: return@runCatching null
                             val sourceTransform = analysisTransform
@@ -566,16 +868,38 @@ fun LiveInferenceScreen(
                                 inference = inference,
                                 coordinateMatrix = matrix
                             )
+                            overlayPublishedForBenchmark = true
                         }
+                        }
+                        uiPublishNs = System.nanoTime() - uiPublishStartedNs
                     }
+                    publishedForBenchmark = true
                 }.onFailure { throwable ->
                     scope.launch(Dispatchers.Main) {
                         statusText = throwable.message ?: "Inference error"
                     }
                 }
-
-                bitmap.recycle()
-                busy.set(false)
+                } finally {
+                    measuredInference?.let { result ->
+                        liveBenchmarkCollector.onCompleted(
+                            token = benchmarkToken,
+                            result = result,
+                            pipelineMs = (
+                                (System.nanoTime() - pipelineStartedNs) / 1_000_000L
+                                ).coerceAtLeast(0L),
+                            published = publishedForBenchmark,
+                            overlayPublished = overlayPublishedForBenchmark,
+                            usedBulkRgbaCopy = convertedBitmap.usedBulkRgbaCopy,
+                            conversionNs = conversionNs,
+                            trackingWriteNs = trackingWriteNs,
+                            uiPublishNs = uiPublishNs
+                        )
+                    }
+                    if (convertedBitmap.recycleAfterUse && !bitmap.isRecycled) {
+                        bitmap.recycle()
+                    }
+                    workerLease?.release() ?: busy.set(false)
+                }
             }
         }
 
@@ -626,36 +950,358 @@ fun LiveInferenceScreen(
 
     DisposableEffect(Unit) {
         onDispose {
+            liveBenchmarkJob?.cancel()
+            liveBenchmarkCollector.cancel()
             metricsRecorder.close()
+            annotationTimelineRecorder.close()
             rawRecorder.close()
             roiPreviewFrame?.bitmap?.recycle()
             scope.launch { annotatedRecorder.stop() }
+            liveWorkerPool?.let { pool ->
+                scope.launch { pool.closeOwnedRunners() }
+            }
             currentRecordingBusyCallback(false)
             unlockRecordingOrientation()
             analyzerExecutor.shutdown()
         }
     }
 
-    fun startRecording() {
+    LaunchedEffect(showRoiEditor) {
+        currentImmersiveModalCallback(
+            BuildConfig.MODEL_SCOPED_PIPELINE_AUTOTUNE && showRoiEditor
+        )
+    }
+
+    suspend fun measureLiveCameraConfiguration(
+        configuration: LiveCameraBenchmarkConfiguration,
+        phaseLabel: String
+    ): LiveCameraBenchmarkSample {
+        val rendererChanged =
+            (benchmarkRendererOverride ?: previewRenderer) != configuration.previewRenderer
+        liveBenchmarkAnalysisPaused.set(true)
+        liveBenchmarkCollector.cancel()
+        try {
+            val drainedBeforeChange = withTimeoutOrNull(LIVE_BENCHMARK_IDLE_TIMEOUT_MS) {
+                liveWorkerPool?.awaitIdle()
+                true
+            } == true
+            check(drainedBeforeChange) {
+                "$phaseLabel could not safely pause the inference workers."
+            }
+
+            // Apply the whole candidate only after every runner is idle. Compose may rebind
+            // CameraX when the PreviewView renderer changes, so analysis remains gated until
+            // the new camera stream has had time to attach.
+            benchmarkRendererOverride = configuration.previewRenderer
+            benchmarkTuningOverride = configuration.tuning("real Live camera benchmark")
+            benchmarkWorkersOverride = configuration.workers
+            statusText = "$phaseLabel: warming up ${configuration.label}..."
+            delay(
+                if (rendererChanged) {
+                    LIVE_BENCHMARK_RENDERER_REBIND_MS
+                } else {
+                    LIVE_BENCHMARK_WARMUP_MS
+                }
+            )
+
+            // Do not rely on a fixed delay alone. Requiring completed camera inference frames
+            // proves that both CameraX and NCNN resumed before the timed 30-frame sample starts.
+            val warmupToken = liveBenchmarkCollector.begin(
+                configuration,
+                targetCompletedFrames = LIVE_BENCHMARK_COMPLETED_WARMUP_FRAMES
+            )
+            liveBenchmarkAnalysisPaused.set(false)
+            val warmedUp = withTimeoutOrNull(LIVE_BENCHMARK_RESUME_TIMEOUT_MS) {
+                while (!liveBenchmarkCollector.isComplete(warmupToken)) delay(10L)
+                true
+            } == true
+            check(warmedUp) {
+                "$phaseLabel did not receive completed inference frames after the camera transition."
+            }
+
+            liveBenchmarkAnalysisPaused.set(true)
+            val warmupDrained = withTimeoutOrNull(LIVE_BENCHMARK_IDLE_TIMEOUT_MS) {
+                liveWorkerPool?.awaitIdle()
+                true
+            } == true
+            check(warmupDrained) {
+                "$phaseLabel could not drain the warm-up frames."
+            }
+            liveBenchmarkCollector.finish(warmupToken)
+
+            val token = liveBenchmarkCollector.begin(
+                configuration,
+                targetCompletedFrames = LIVE_BENCHMARK_FRAMES_PER_COMBINATION
+            )
+            statusText = "$phaseLabel: measuring 30 frames with ${configuration.label}..."
+            liveBenchmarkAnalysisPaused.set(false)
+            val observedInferenceMs = latestOverlay
+                ?.inference
+                ?.inferenceMs
+                ?.coerceAtLeast(1L)
+                ?: 1L
+            val combinationTimeoutMs = maxOf(
+                LIVE_BENCHMARK_COMBINATION_TIMEOUT_MS,
+                observedInferenceMs * LIVE_BENCHMARK_FRAMES_PER_COMBINATION * 2L
+            ).coerceAtMost(LIVE_BENCHMARK_MAX_COMBINATION_TIMEOUT_MS)
+            val completed = withTimeoutOrNull(combinationTimeoutMs) {
+                while (!liveBenchmarkCollector.isComplete(token)) delay(10L)
+                true
+            } == true
+            check(completed) {
+                "$phaseLabel did not complete 30 inference frames within the safety timeout."
+            }
+
+            liveBenchmarkAnalysisPaused.set(true)
+            val measurementDrained = withTimeoutOrNull(LIVE_BENCHMARK_IDLE_TIMEOUT_MS) {
+                liveWorkerPool?.awaitIdle()
+                true
+            } == true
+            check(measurementDrained) {
+                "$phaseLabel could not drain the measured inference frames."
+            }
+            return liveBenchmarkCollector.finish(token)
+        } catch (error: Throwable) {
+            liveBenchmarkCollector.cancel()
+            throw error
+        } finally {
+            liveBenchmarkAnalysisPaused.set(false)
+        }
+    }
+
+    fun startLiveCameraBenchmark() {
         if (
-            isRecording || isPreparingRecording ||
-            isFinalizingRecording || !recordingOptions.hasOutput
+            !BuildConfig.POSTPROCESS_LIVE_ANNOTATED_VIDEO ||
+            isRecording || isPreparingRecording || isFinalizingRecording ||
+            isLiveBenchmarking || selectedModel.runtime !in setOf(
+                ModelRuntime.NCNN_CPU,
+                ModelRuntime.NCNN_VULKAN
+            )
         ) {
             return
         }
+        val candidates = liveCameraBenchmarkCandidates(
+            cpuCores = Runtime.getRuntime().availableProcessors(),
+            currentTuning = ncnnTuning,
+            currentWorkers = ncnnWorkers,
+            previewRenderers = if (BuildConfig.MODEL_SCOPED_PIPELINE_AUTOTUNE) {
+                listOf(
+                    previewRenderer,
+                    *LivePreviewRenderer.entries
+                        .filterNot { it == previewRenderer }
+                        .toTypedArray()
+                )
+            } else {
+                listOf(previewRenderer)
+            }
+        )
+        liveBenchmarkResult = null
+        pendingLiveBenchmarkProfile = null
+        isLiveBenchmarking = true
+        currentRecordingBusyCallback(true)
+        lockRecordingOrientation()
+        liveBenchmarkJob = scope.launch {
+            var temporaryRawFile: File? = null
+            var recorderActive = false
+            try {
+                val previewSamples = candidates.mapIndexed { index, configuration ->
+                    measureLiveCameraConfiguration(
+                        configuration,
+                        "Preview ${index + 1}/${candidates.size}"
+                    )
+                }
+
+                val recordingSamples = mutableListOf<LiveCameraBenchmarkSample>()
+                val recordingProbes = mutableListOf<LiveCameraRecordingProbe>()
+                val rendererGroups = candidates.groupBy { it.previewRenderer }
+                var completedRecordingCombinations = 0
+                rendererGroups.forEach { (renderer, configurations) ->
+                    benchmarkRendererOverride = renderer
+                    rawCaptureArmed = true
+                    statusText = "Preparing the ${rawVideoQuality.displayName} real CameraX " +
+                        "recording benchmark with ${renderer.displayName}..."
+                    val capture = withTimeout(LIVE_BENCHMARK_CAPTURE_TIMEOUT_MS) {
+                        while (rawVideoCapture == null) delay(25L)
+                        requireNotNull(rawVideoCapture)
+                    }
+                    liveWorkerPool?.awaitIdle()
+                    temporaryRawFile = rawRecorder.start(capture)
+                    recorderActive = true
+                    isBenchmarkRecording = true
+                    delay(LIVE_BENCHMARK_RECORDING_STABILIZE_MS)
+
+                    configurations.forEach { configuration ->
+                        completedRecordingCombinations += 1
+                        recordingSamples += measureLiveCameraConfiguration(
+                            configuration,
+                            "Recording $completedRecordingCombinations/${candidates.size}"
+                        )
+                    }
+                    val finalizedRaw = rawRecorder.stop()
+                    recorderActive = false
+                    isBenchmarkRecording = false
+                    temporaryRawFile = finalizedRaw ?: temporaryRawFile
+                    recordingProbes += withContext(Dispatchers.IO) {
+                        probeLiveCameraRecording(
+                            requireNotNull(temporaryRawFile) {
+                                "The temporary CameraX benchmark recording was unavailable."
+                            }
+                        ).also { temporaryRawFile?.delete() }
+                    }
+                    temporaryRawFile = null
+                    rawCaptureArmed = false
+                    withTimeout(LIVE_BENCHMARK_CAPTURE_TIMEOUT_MS) {
+                        while (rawVideoCapture != null) delay(25L)
+                    }
+                }
+                val recordingProbe = recordingProbes.minByOrNull { it.frameRate }
+                    ?: error("No CameraX recording probe completed.")
+                val result = LiveCameraBenchmarkResult(
+                    previewSamples = previewSamples,
+                    recordingSamples = recordingSamples.toList(),
+                    recordingProbe = recordingProbe
+                )
+                liveBenchmarkResult = result
+                val recommended = result.recommended
+                val backend = if (recommended.configuration.useVulkan) {
+                    NativeNcnnBackend.VULKAN
+                } else {
+                    NativeNcnnBackend.CPU
+                }
+                pendingLiveBenchmarkProfile = NcnnExecutionProfile(
+                        modelId = selectedModel.id,
+                        threadsPerWorker = recommended.configuration.threadsPerWorker,
+                        workers = recommended.configuration.workers,
+                        backend = backend,
+                        measuredPipelineFps = recommended.publishedFps,
+                        benchmarked = true,
+                        streamingThreads = recommended.configuration.threadsPerWorker,
+                        streamingWorkers = recommended.configuration.workers,
+                        streamingBackend = backend,
+                        measuredStreamingPipelineFps = recommended.publishedFps,
+                        selection = NcnnProfileSelection.AUTOMATIC,
+                        vulkanParityPassed = ncnnVulkanParityPassed,
+                        livePreviewRendererStorageName =
+                            recommended.configuration.previewRenderer.storageName
+                    )
+                val targetText = if (
+                    recommended.publishedFps >= result.recordingProbe.frameRate * 0.98
+                ) {
+                    "Analysis kept pace with the measured camera rate."
+                } else {
+                    "The selected model did not reach 30 analysis updates/s on this camera."
+                }
+                statusText = String.format(
+                    Locale.US,
+                    "Live camera benchmark complete. Preview %.1f updates/s; " +
+                        "%s recording %.1f updates/s; raw camera %.1f FPS. %s " +
+                        "Recording pipeline median %d ms, p95 %d ms. Median stages: " +
+                        "camera RGBA copy %.1f ms; model %d ms (preprocess %d ms); " +
+                        "tracking/writes %.1f ms; UI publication %.1f ms. " +
+                        "Busy drops %d/%d (%.1f%%); screen overlay %.1f updates/s; " +
+                        "bulk RGBA path %d/%d frames. Likely bottleneck: %s. " +
+                        "Analysis buffer %d x %d. Settings: visible preview %s, %s, " +
+                        "annotations %s. Recommended %s; review before applying.",
+                    result.bestPreview.publishedFps,
+                    rawVideoQuality.displayName,
+                    recommended.publishedFps,
+                    result.recordingProbe.frameRate,
+                    targetText,
+                    recommended.medianPipelineMs,
+                    recommended.p95PipelineMs,
+                    recommended.medianConversionMs,
+                    recommended.medianModelPipelineMs,
+                    recommended.medianPreprocessingMs,
+                    recommended.medianTrackingWriteMs,
+                    recommended.medianUiPublishMs,
+                    recommended.busyDrops,
+                    recommended.cameraCallbacks,
+                    recommended.busyDropPercent,
+                    recommended.overlayFps,
+                    recommended.bulkRgbaFrames,
+                    recommended.completedFrames,
+                    recommended.bottleneckStage,
+                    recommended.analysisWidth,
+                    recommended.analysisHeight,
+                    previewQuality.displayName,
+                    recommended.configuration.previewRenderer.displayName,
+                    overlayRefreshRate.displayName,
+                    recommended.configuration.label
+                )
+            } catch (timeout: TimeoutCancellationException) {
+                statusText =
+                    "Live camera benchmark timed out while waiting for CameraX; " +
+                        "temporary media removed and the camera restored."
+            } catch (cancelled: CancellationException) {
+                statusText = "Live camera benchmark cancelled; temporary media removed."
+            } catch (error: Throwable) {
+                statusText = error.message ?: "Live camera benchmark failed safely."
+            } finally {
+                withContext(NonCancellable) {
+                    liveBenchmarkCollector.cancel()
+                    if (recorderActive) {
+                        runCatching { rawRecorder.stop() }
+                            .getOrNull()
+                            ?.let { temporaryRawFile = it }
+                    }
+                    isBenchmarkRecording = false
+                    withContext(Dispatchers.IO) {
+                        temporaryRawFile?.delete()
+                    }
+                    benchmarkTuningOverride = null
+                    benchmarkWorkersOverride = null
+                    benchmarkRendererOverride = null
+                    rawCaptureArmed = false
+                    liveBenchmarkAnalysisPaused.set(false)
+                    isLiveBenchmarking = false
+            currentRecordingBusyCallback(false)
+            currentImmersiveModalCallback(false)
+            unlockRecordingOrientation()
+                    liveBenchmarkJob = null
+                }
+            }
+        }
+    }
+
+    fun toggleLiveCameraBenchmark() {
+        if (isLiveBenchmarking) {
+            liveBenchmarkJob?.cancel()
+        } else {
+            startLiveCameraBenchmark()
+        }
+    }
+
+    fun startRecording() {
+        if (
+            isRecording || isPreparingRecording ||
+            isFinalizingRecording || isLiveBenchmarking ||
+            !recordingOptions.hasOutput
+        ) {
+            return
+        }
+        val effectiveStorageOptions = if (recordingOptions.requiresRawMaster()) {
+            recordingOptions.copy(rawVideo = true)
+        } else {
+            recordingOptions
+        }
         val storageBudget = runCatching {
-            LiveRecordingStorage.requireStartCapacity(context, recordingOptions)
+            LiveRecordingStorage.requireStartCapacity(
+                context,
+                effectiveStorageOptions,
+                rawVideoQuality
+            )
         }.getOrElse { error ->
             statusText = error.message ?: "Could not verify recording storage."
             return
         }
         lockRecordingOrientation()
-        if (recordingOptions.rawVideo) {
+        if (recordingOptions.requiresRawMaster()) {
             isPreparingRecording = true
             startRequested = true
             rawCaptureArmed = true
             currentRecordingBusyCallback(true)
-            statusText = "Preparing the 30 FPS raw camera recorder; " +
+            statusText = "Preparing the ${rawVideoQuality.displayName} 30 FPS raw camera " +
+                "recorder; " +
                 "${LiveRecordingStorage.formatBytes(storageBudget.requiredBytes)} " +
                 "disk budget checked."
         } else {
@@ -672,23 +1318,29 @@ fun LiveInferenceScreen(
         scope.launch {
             val messages = mutableListOf<String>()
             val options = recordingOptions
+            var rawMasterFile: File? = null
+            var completedAnnotatedResult: LiveAnnotatedPostProcessResult? = null
             try {
                 statusText = "Finalizing recorded video before analytics..."
-                if (options.rawVideo) {
+                if (options.requiresRawMaster()) {
                     runCatching { rawRecorder.stop() }
                         .onSuccess { recordedFile ->
                             if (recordedFile == null) {
                                 messages += "No raw camera frames were recorded."
                             } else {
-                                rawVideoPath = recordedFile.absolutePath
-                                runCatching {
-                                    publishVideoToMediaStore(context, recordedFile)
-                                }.onSuccess { mediaUri ->
-                                    rawMediaUri = mediaUri.toString()
-                                    messages += "Raw video saved."
-                                }.onFailure {
-                                    messages +=
-                                        "Raw video saved in IntegraPose Live; media-library copy failed."
+                                rawMasterFile = recordedFile
+                                if (options.rawVideo) {
+                                    rawVideoPath = recordedFile.absolutePath
+                                    runCatching {
+                                        publishVideoToMediaStore(context, recordedFile)
+                                    }.onSuccess { mediaUri ->
+                                        rawMediaUri = mediaUri.toString()
+                                        messages += "Raw video saved."
+                                    }.onFailure {
+                                        messages +=
+                                            "Raw video saved in IntegraPose Live; " +
+                                            "media-library copy failed."
+                                    }
                                 }
                             }
                         }
@@ -699,80 +1351,234 @@ fun LiveInferenceScreen(
                         }
                 }
 
-                if (options.annotatedVideo) {
-                    runCatching { annotatedRecorder.stop() }
-                    .onSuccess { recordingResult ->
-                        val recordedFile = recordingResult.file
-                            ?.takeIf { it.isFile && it.length() > 0L }
-                        if (recordedFile == null) {
-                            messages +=
-                                "No inferred frames were available for the annotated video."
-                            return@onSuccess
+                // CSV/behavior analytics has biological priority and does not depend on the
+                // optional annotated derivative. Finalize it concurrently and publish its paths
+                // as soon as it completes instead of holding it behind a long video export.
+                suspend fun finalizeMetrics() {
+                    runCatching {
+                        withContext(Dispatchers.IO) { metricsRecorder.stop() }
+                    }.onSuccess { metricFiles ->
+                        csvPath = metricFiles.detectionCsvPath
+                        boutCsvPath = metricFiles.boutCsvPath
+                        roiCsvPath = metricFiles.roiCsvPath
+                        if (metricFiles.analyzedFrames > 0) {
+                            messages += "Post-record analysis used " +
+                                "${metricFiles.analyzedFrames} frames at " +
+                                String.format(
+                                    Locale.US,
+                                    "%.1f FPS",
+                                    metricFiles.observedFrameRate
+                                ) + "; analytics took " +
+                                "${metricFiles.analyticsDurationMs} ms."
                         }
-                        annotatedVideoPath = recordedFile.absolutePath
-                        runCatching {
-                            publishVideoToMediaStore(context, recordedFile)
-                        }.onSuccess { mediaUri ->
-                            annotatedMediaUri = mediaUri.toString()
-                            messages += "Annotated video saved."
-                        }.onFailure {
-                            messages +=
-                                "Annotated video saved in IntegraPose Live; media-library copy failed."
+                        if (metricFiles.droppedJournalFrames > 0) {
+                            messages += "Inference journal dropped " +
+                                "${metricFiles.droppedJournalFrames} frame(s); " +
+                                "review device throughput."
                         }
-                        messages += "Annotated encoder wrote " +
-                            "${recordingResult.encodedFrames}/" +
-                            "${recordingResult.acceptedFrames} accepted frames at " +
-                            String.format(
-                                Locale.US,
-                                "%.1f FPS",
-                                recordingResult.acceptedFrameRate
-                            ) + "."
-                        if (recordingResult.queueDroppedFrames > 0) {
-                            messages += "Annotated queue dropped " +
-                                "${recordingResult.queueDroppedFrames} frame(s)."
+                        if (
+                            csvPath != null || boutCsvPath != null || roiCsvPath != null
+                        ) {
+                            messages += "Selected CSV output saved."
                         }
-                    }
-                    .onFailure { error ->
-                        messages += (
-                            error.message ?:
-                                "Could not finish the annotated recording."
-                            )
+                    }.onFailure { error ->
+                        messages += error.message ?: "Could not build behavior analytics."
                     }
                 }
-                statusText = "Building tracking, bouts, and ROI analytics after recording..."
-                runCatching {
-                    withContext(Dispatchers.IO) { metricsRecorder.stop() }
-                }.onSuccess { metricFiles ->
-                    csvPath = metricFiles.detectionCsvPath
-                    boutCsvPath = metricFiles.boutCsvPath
-                    roiCsvPath = metricFiles.roiCsvPath
-                    if (metricFiles.analyzedFrames > 0) {
-                        messages += "Post-record analysis used " +
-                            "${metricFiles.analyzedFrames} frames at " +
-                            String.format(
-                                Locale.US,
-                                "%.1f FPS",
-                                metricFiles.observedFrameRate
-                            ) + "; analytics took " +
-                            "${metricFiles.analyticsDurationMs} ms."
-                    }
-                    if (metricFiles.droppedJournalFrames > 0) {
-                        messages += "Inference journal dropped " +
-                            "${metricFiles.droppedJournalFrames} frame(s); " +
-                            "review device throughput."
-                    }
-                }.onFailure { error ->
-                    messages += error.message ?: "Could not build behavior analytics."
-                }
-                if (
-                    csvPath != null || boutCsvPath != null ||
-                    roiCsvPath != null
+                val metricsJob = if (
+                    shouldFinalizeMetricsConcurrently(
+                        BuildConfig.POSTPROCESS_LIVE_ANNOTATED_VIDEO
+                    )
                 ) {
-                    messages += "Selected CSV output saved."
+                    launch { finalizeMetrics() }
+                } else {
+                    null
                 }
-                statusText = messages.joinToString(" ")
-                    .ifBlank { "Live session finished." }
+
+                if (options.annotatedVideo) {
+                    if (BuildConfig.POSTPROCESS_LIVE_ANNOTATED_VIDEO) {
+                        val timelineResult = runCatching {
+                            annotationTimelineRecorder.stop()
+                        }.getOrElse { error ->
+                            messages += error.message ?:
+                                "Could not finish the annotation timeline."
+                            null
+                        }
+                        val master = rawMasterFile
+                        if (timelineResult == null || master == null) {
+                            timelineResult?.file?.delete()
+                            messages +=
+                                "Annotated derivative was not built; its raw master or " +
+                                "inference timeline was unavailable."
+                        } else {
+                            statusText =
+                                "Building the 30 FPS annotated derivative from the raw master..."
+                            postProcessProgress = LivePostProcessProgress(
+                                encodedFrames = 0,
+                                sourceFrames = 0
+                            )
+                            runCatching {
+                                try {
+                                    annotatedPostProcessor.process(
+                                        rawFile = master,
+                                        timelineFile = timelineResult,
+                                        annotationStyle = annotationStyle,
+                                        skeletonConnections =
+                                            selectedModel.skeletonConnections,
+                                        rois = if (options.drawRoisOnAnnotatedVideo) {
+                                        recordingRois
+                                        } else {
+                                            emptyList()
+                                        },
+                                        onProgress = { encoded, source ->
+                                            postProcessProgress = LivePostProcessProgress(
+                                                encodedFrames = encoded,
+                                                sourceFrames = source
+                                            )
+                                            statusText =
+                                                "Building 30 FPS annotated derivative: " +
+                                                encoded + "/" + source + " frames..."
+                                        }
+                                    )
+                                } finally {
+                                    timelineResult.file.delete()
+                                }
+                            }.onSuccess { result ->
+                                completedAnnotatedResult = result
+                                annotatedVideoPath = result.file.absolutePath
+                                runCatching {
+                                    publishVideoToMediaStore(context, result.file)
+                                }.onSuccess { mediaUri ->
+                                    annotatedMediaUri = mediaUri.toString()
+                                    messages += "Annotated video saved."
+                                }.onFailure {
+                                    messages +=
+                                        "Annotated video saved in IntegraPose Live; " +
+                                        "media-library copy failed."
+                                }
+                                messages += "Annotated derivative wrote " +
+                                    result.encodedFrames + "/" + result.sourceFrames +
+                                    " raw frames at " + result.outputFrameRate +
+                                    ".0 FPS using " + result.inferenceSamples +
+                                    " inference samples; " +
+                                    result.reusedInferenceFrames +
+                                    " frames reused the latest available result. " +
+                                    "Pipeline: " + result.pipelineName + ". " +
+                                    "Postprocessing took " +
+                                    String.format(
+                                        Locale.US,
+                                        "%.1f seconds",
+                                        result.processingDurationMs / 1_000.0
+                                    ) + " (" + String.format(
+                                        Locale.US,
+                                        "%.2fx recording duration",
+                                        result.processingDurationMs.toDouble() /
+                                            result.sourceDurationMs.coerceAtLeast(1L)
+                                    ) + ")."
+                                result.fallbackReason?.let { reason ->
+                                    messages += "Hardware compositor fallback: $reason"
+                                }
+                                if (timelineResult.droppedSamples > 0) {
+                                    messages += "Annotation timeline dropped " +
+                                        timelineResult.droppedSamples + " sample(s)."
+                                }
+                                if (!options.rawVideo) {
+                                    master.delete()
+                                }
+                            }.onFailure { error ->
+                                messages += error.message ?:
+                                    "Could not build the annotated derivative."
+                                if (!options.rawVideo) {
+                                    rawVideoPath = master.absolutePath
+                                    messages +=
+                                        "The raw master was retained in IntegraPose Live " +
+                                        "for recovery."
+                                }
+                            }
+                            postProcessProgress = null
+                        }
+                    } else {
+                        runCatching { annotatedRecorder.stop() }
+                            .onSuccess { recordingResult ->
+                                val recordedFile = recordingResult.file
+                                    ?.takeIf { it.isFile && it.length() > 0L }
+                                if (recordedFile == null) {
+                                    messages +=
+                                        "No inferred frames were available for the " +
+                                        "annotated video."
+                                    return@onSuccess
+                                }
+                                annotatedVideoPath = recordedFile.absolutePath
+                                runCatching {
+                                    publishVideoToMediaStore(context, recordedFile)
+                                }.onSuccess { mediaUri ->
+                                    annotatedMediaUri = mediaUri.toString()
+                                    messages += "Annotated video saved."
+                                }.onFailure {
+                                    messages +=
+                                        "Annotated video saved in IntegraPose Live; " +
+                                        "media-library copy failed."
+                                }
+                                messages += "Annotated encoder wrote " +
+                                    recordingResult.encodedFrames + "/" +
+                                    recordingResult.acceptedFrames +
+                                    " accepted frames at " +
+                                    String.format(
+                                        Locale.US,
+                                        "%.1f FPS",
+                                        recordingResult.acceptedFrameRate
+                                    ) + "."
+                                if (recordingResult.queueDroppedFrames > 0) {
+                                    messages += "Annotated queue dropped " +
+                                        recordingResult.queueDroppedFrames + " frame(s)."
+                                }
+                            }
+                            .onFailure { error ->
+                                messages += (
+                                    error.message ?:
+                                        "Could not finish the annotated recording."
+                                    )
+                            }
+                    }
+                }
+                if (metricsJob != null) {
+                    metricsJob.join()
+                } else {
+                    // Preserve the established debug/release ordering exactly.
+                    finalizeMetrics()
+                }
+                val allRequestedOutputsSaved =
+                    (!options.rawVideo || rawVideoPath != null) &&
+                        (!options.annotatedVideo || annotatedVideoPath != null) &&
+                        (!options.detectionCsv || csvPath != null) &&
+                        (!options.classBouts || boutCsvPath != null) &&
+                        (!options.roiVisits || roiCsvPath != null)
+                statusText = if (
+                    BuildConfig.POSTPROCESS_LIVE_ANNOTATED_VIDEO &&
+                    allRequestedOutputsSaved
+                ) {
+                    buildString {
+                        append("Recording complete. Selected video and analysis files were saved.")
+                        completedAnnotatedResult?.let { result ->
+                            append(" All ")
+                            append(result.encodedFrames)
+                            append(" annotated-video frames were preserved. Processing took ")
+                            append(
+                                String.format(
+                                    Locale.US,
+                                    "%.1f seconds.",
+                                    result.processingDurationMs / 1_000.0
+                                )
+                            )
+                        }
+                    }
+                } else {
+                    messages.joinToString(" ").ifBlank { "Live session finished." }
+                }
+                Log.i("IntegraPoseLiveSave", messages.joinToString(" "))
             } finally {
+                postProcessProgress = null
+                annotationTimelineRecorder.close()
                 startRequested = false
                 rawCaptureArmed = false
                 isPreparingRecording = false
@@ -848,11 +1654,77 @@ fun LiveInferenceScreen(
         )
     }
 
+    pendingLiveBenchmarkProfile?.let { pendingProfile ->
+        val result = liveBenchmarkResult
+        val recommended = result?.recommended
+        if (recommended != null) {
+            AdaptiveAlertDialog(
+                onDismissRequest = {
+                    pendingLiveBenchmarkProfile = null
+                    statusText = "Benchmark recommendation was not applied; the current " +
+                        "Live profile remains active."
+                },
+                title = { Text("Apply recommended Live profile?") },
+                text = {
+                    Text(
+                        String.format(
+                            Locale.US,
+                            "Winner: %s. Preview %.1f updates/s; %s recording %.1f " +
+                                "updates/s; raw camera %.1f FPS. Median %d ms, p95 %d ms; " +
+                                "busy drops %.1f%%. Apply and persist this profile for %s?",
+                            recommended.configuration.label,
+                            result.bestPreview.publishedFps,
+                            rawVideoQuality.displayName,
+                            recommended.publishedFps,
+                            result.recordingProbe.frameRate,
+                            recommended.medianPipelineMs,
+                            recommended.p95PipelineMs,
+                            recommended.busyDropPercent,
+                            selectedModel.name
+                        )
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            currentLiveProfileSelected(pendingProfile)
+                            pendingLiveBenchmarkProfile = null
+                            statusText = String.format(
+                                Locale.US,
+                                "Applied %s at %.1f recording updates/s (raw camera %.1f " +
+                                    "FPS). This profile will be reused for %s until the " +
+                                    "model is deleted or the renderer is manually changed.",
+                                recommended.configuration.label,
+                                recommended.publishedFps,
+                                result.recordingProbe.frameRate,
+                                selectedModel.name
+                            )
+                        }
+                    ) {
+                        Text("Apply recommended")
+                    }
+                },
+                dismissButton = {
+                    OutlinedButton(
+                        onClick = {
+                            pendingLiveBenchmarkProfile = null
+                            statusText = "Benchmark recommendation was not applied; the " +
+                                "current Live profile remains active."
+                        }
+                    ) {
+                        Text("Keep current")
+                    }
+                }
+            )
+        }
+    }
+
     if (showRoiEditor) {
         roiPreviewFrame?.let { preview ->
             RoiEditorDialog(
                 previewBitmap = preview.bitmap,
                 existingRois = rois.mapNotNull(preview.viewport::toEditorRoi),
+                landscapeCanvasPriority = BuildConfig.MODEL_SCOPED_PIPELINE_AUTOTUNE,
                 onDismiss = { showRoiEditor = false },
                 onUseRois = { selected ->
                     rois = selected.map(preview.viewport::toSourceRoi)
@@ -907,6 +1779,7 @@ fun LiveInferenceScreen(
         roiCsvPath != null
     val hasSelectableOutputs = rawVideoPath != null || annotatedVideoPath != null ||
         csvPath != null || boutCsvPath != null || roiCsvPath != null
+    val hasScrollableSessionDetails = hasSelectableOutputs || liveBenchmarkResult != null
     val portraitScrollState = rememberScrollState()
 
     val switchCamera = {
@@ -927,8 +1800,13 @@ fun LiveInferenceScreen(
             latestInference = latestInference,
             detections = detections,
             detectionCount = liveDetectionCount,
-            rois = rois,
-            isRecording = isRecording,
+            rois = if (BuildConfig.MODEL_SCOPED_PIPELINE_AUTOTUNE) {
+                orientedRois
+            } else {
+                rois
+            },
+            isRecording = isRecording || isBenchmarkRecording,
+            postProcessProgress = postProcessProgress,
             modifier = Modifier.fillMaxSize()
         )
     }
@@ -938,6 +1816,12 @@ fun LiveInferenceScreen(
             isRecording = isRecording,
             isPreparingRecording = isPreparingRecording,
             isFinalizingRecording = isFinalizingRecording,
+            isLiveBenchmarking = isLiveBenchmarking,
+            showLiveBenchmark = BuildConfig.POSTPROCESS_LIVE_ANNOTATED_VIDEO &&
+                selectedModel.runtime in setOf(
+                    ModelRuntime.NCNN_CPU,
+                    ModelRuntime.NCNN_VULKAN
+                ),
             hasRecordingOutput = recordingOptions.hasOutput,
             trackingEnabled = trackingEnabled,
             detectionCount = liveDetectionCount,
@@ -947,7 +1831,8 @@ fun LiveInferenceScreen(
             onCamera = switchCamera,
             onTracking = { trackingEnabled = !trackingEnabled },
             onAlign = { showCalibration = true },
-            onDetectionCount = { showDetectionCountDialog = true }
+            onDetectionCount = { showDetectionCountDialog = true },
+            onLiveBenchmark = ::toggleLiveCameraBenchmark
         )
     }
     val sessionContent: @Composable (Boolean) -> Unit = { internallyScrollable ->
@@ -1000,7 +1885,7 @@ fun LiveInferenceScreen(
                     .fillMaxSize()
                     .verticalScroll(
                         state = portraitScrollState,
-                        enabled = hasSelectableOutputs
+                        enabled = hasScrollableSessionDetails
                     )
             ) {
                 Column(
@@ -1019,7 +1904,7 @@ fun LiveInferenceScreen(
                         Box(modifier = Modifier.fillMaxSize()) {
                             previewContent()
                             when {
-                                hasSelectableOutputs &&
+                                hasScrollableSessionDetails &&
                                     portraitScrollState.value < portraitScrollState.maxValue -> {
                                     Card(
                                         onClick = {
@@ -1045,7 +1930,11 @@ fun LiveInferenceScreen(
                                             horizontalArrangement = Arrangement.spacedBy(5.dp)
                                         ) {
                                             Text(
-                                                text = "Outputs available",
+                                                text = if (hasSelectableOutputs) {
+                                                    "Outputs available"
+                                                } else {
+                                                    "Benchmark result available"
+                                                },
                                                 color = Color(0xFFA8F0D3),
                                                 style = MaterialTheme.typography.bodyMedium
                                             )
@@ -1058,7 +1947,9 @@ fun LiveInferenceScreen(
                                     }
                                 }
 
-                                !hasSelectableOutputs && statusText != null -> {
+                                !hasScrollableSessionDetails &&
+                                    statusText != null &&
+                                    postProcessProgress == null -> {
                                     Card(
                                         modifier = Modifier
                                             .align(Alignment.BottomCenter)
@@ -1087,7 +1978,7 @@ fun LiveInferenceScreen(
                     controlsContent(false)
                 }
 
-                if (hasSelectableOutputs) {
+                if (hasScrollableSessionDetails) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1134,6 +2025,7 @@ private fun LivePreviewPanel(
     detectionCount: Int,
     rois: List<BehaviorRoi>,
     isRecording: Boolean,
+    postProcessProgress: LivePostProcessProgress?,
     modifier: Modifier = Modifier
 ) {
     Box(
@@ -1141,7 +2033,17 @@ private fun LivePreviewPanel(
             .clip(RoundedCornerShape(16.dp))
             .background(Color.Black)
     ) {
-        AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
+        // AndroidView retains the native View at a stable composition position even when the
+        // factory lambda captures a different PreviewView. Keying the node makes a renderer
+        // benchmark transition actually attach the replacement TextureView/SurfaceView before
+        // CameraX posts its bind operation to that PreviewView.
+        if (BuildConfig.MODEL_SCOPED_PIPELINE_AUTOTUNE) {
+            key(previewView) {
+                AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
+            }
+        } else {
+            AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
+        }
 
         androidx.compose.foundation.Canvas(modifier = Modifier.fillMaxSize()) {
             val currentOverlay = overlay ?: return@Canvas
@@ -1195,6 +2097,48 @@ private fun LivePreviewPanel(
                 }
             }
         }
+
+        postProcessProgress?.let { progress ->
+            Card(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth(0.94f)
+                    .padding(8.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color(0xEE172536)
+                )
+            ) {
+                Column(
+                    modifier = Modifier.padding(
+                        horizontal = 12.dp,
+                        vertical = 10.dp
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(7.dp)
+                ) {
+                    Text(
+                        text = if (progress.sourceFrames > 0) {
+                            "Building annotated video: " +
+                                progress.encodedFrames + "/" +
+                                progress.sourceFrames + " frames"
+                        } else {
+                            "Preparing annotated video..."
+                        },
+                        color = Color(0xFFFFD2A6),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    if (progress.sourceFrames > 0) {
+                        LinearProgressIndicator(
+                            progress = { progress.fraction },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    } else {
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1204,6 +2148,8 @@ private fun LiveControlPanel(
     isRecording: Boolean,
     isPreparingRecording: Boolean,
     isFinalizingRecording: Boolean,
+    isLiveBenchmarking: Boolean,
+    showLiveBenchmark: Boolean,
     hasRecordingOutput: Boolean,
     trackingEnabled: Boolean,
     detectionCount: Int,
@@ -1213,9 +2159,11 @@ private fun LiveControlPanel(
     onCamera: () -> Unit,
     onTracking: () -> Unit,
     onAlign: () -> Unit,
-    onDetectionCount: () -> Unit
+    onDetectionCount: () -> Unit,
+    onLiveBenchmark: () -> Unit
 ) {
-    val idle = !isRecording && !isPreparingRecording && !isFinalizingRecording
+    val idle = !isRecording && !isPreparingRecording &&
+        !isFinalizingRecording && !isLiveBenchmarking
     val recordLabel = when {
         isFinalizingRecording -> "Saving outputs..."
         isPreparingRecording -> "Preparing..."
@@ -1229,9 +2177,21 @@ private fun LiveControlPanel(
             Button(
                 onClick = onRecord,
                 enabled = !isFinalizingRecording &&
-                    !isPreparingRecording && hasRecordingOutput,
+                    !isPreparingRecording && !isLiveBenchmarking && hasRecordingOutput,
                 modifier = Modifier.fillMaxWidth()
             ) { SingleLineLiveButtonText(recordLabel) }
+            if (showLiveBenchmark) {
+                OutlinedButton(
+                    onClick = onLiveBenchmark,
+                    enabled = idle || isLiveBenchmarking,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    SingleLineLiveButtonText(
+                        if (isLiveBenchmarking) "Cancel Live benchmark" else
+                            "Benchmark Live camera"
+                    )
+                }
+            }
             OutlinedButton(
                 onClick = onSetup,
                 enabled = idle,
@@ -1274,7 +2234,7 @@ private fun LiveControlPanel(
             Button(
                 onClick = onRecord,
                 enabled = !isFinalizingRecording &&
-                    !isPreparingRecording && hasRecordingOutput,
+                    !isPreparingRecording && !isLiveBenchmarking && hasRecordingOutput,
                 modifier = Modifier.weight(2f)
             ) { SingleLineLiveButtonText(recordLabel) }
             OutlinedButton(
@@ -1282,6 +2242,18 @@ private fun LiveControlPanel(
                 enabled = idle,
                 modifier = Modifier.weight(1f)
             ) { SingleLineLiveButtonText("Setup") }
+        }
+        if (showLiveBenchmark) {
+            OutlinedButton(
+                onClick = onLiveBenchmark,
+                enabled = idle || isLiveBenchmarking,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                SingleLineLiveButtonText(
+                    if (isLiveBenchmarking) "Cancel Live benchmark" else
+                        "Benchmark Live camera"
+                )
+            }
         }
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -1556,5 +2528,26 @@ private data class LiveOverlayFrame(
     val coordinateMatrix: Matrix?
 )
 
+private data class LivePostProcessProgress(
+    val encodedFrames: Int,
+    val sourceFrames: Int
+) {
+    val fraction: Float
+        get() = if (sourceFrames > 0) {
+            encodedFrames.toFloat().div(sourceFrames.toFloat()).coerceIn(0f, 1f)
+        } else {
+            0f
+        }
+}
+
 private const val LIVE_MAPPING_LOG_TAG = "IntegraPoseLiveMap"
 private const val LIVE_MAPPING_LOG_INTERVAL_FRAMES = 30
+private const val LIVE_BENCHMARK_WARMUP_MS = 150L
+private const val LIVE_BENCHMARK_RENDERER_REBIND_MS = 600L
+private const val LIVE_BENCHMARK_COMBINATION_TIMEOUT_MS = 15_000L
+private const val LIVE_BENCHMARK_MAX_COMBINATION_TIMEOUT_MS = 60_000L
+private const val LIVE_BENCHMARK_IDLE_TIMEOUT_MS = 5_000L
+private const val LIVE_BENCHMARK_RESUME_TIMEOUT_MS = 8_000L
+private const val LIVE_BENCHMARK_COMPLETED_WARMUP_FRAMES = 2
+private const val LIVE_BENCHMARK_RECORDING_STABILIZE_MS = 1_000L
+private const val LIVE_BENCHMARK_CAPTURE_TIMEOUT_MS = 15_000L

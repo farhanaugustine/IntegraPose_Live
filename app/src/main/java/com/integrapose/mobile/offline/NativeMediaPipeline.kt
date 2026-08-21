@@ -60,6 +60,7 @@ data class NcnnExecutionProfile(
     val measuredPipelineFps: Double,
     val benchmarked: Boolean,
     val streamingThreads: Int = threadsPerWorker,
+    val streamingWorkers: Int = 1,
     val streamingBackend: NativeNcnnBackend = backend,
     val measuredStreamingPipelineFps: Double = measuredPipelineFps,
     val selection: NcnnProfileSelection = if (benchmarked) {
@@ -67,12 +68,14 @@ data class NcnnExecutionProfile(
     } else {
         NcnnProfileSelection.SAFE_DEFAULT
     },
-    val vulkanParityPassed: Boolean? = null
+    val vulkanParityPassed: Boolean? = null,
+    val livePreviewRendererStorageName: String? = null
 ) {
     init {
         require(threadsPerWorker >= 1)
         require(workers >= 1)
         require(streamingThreads >= 1)
+        require(streamingWorkers >= 1)
     }
 
     val configurationLabel: String
@@ -87,9 +90,8 @@ data class NcnnExecutionProfile(
         get() = if (streamingBackend == NativeNcnnBackend.VULKAN) {
             streamingBackend.displayName
         } else {
-            "${streamingBackend.displayName}, 1 worker x " +
-                "$streamingThreads " +
-                if (streamingThreads == 1) "thread" else "threads"
+            "${streamingBackend.displayName}, " +
+                formatNcnnCpuConfiguration(streamingWorkers, streamingThreads)
         }
 
     fun auditLabelFor(runtimeBackend: NativeNcnnBackend): String {

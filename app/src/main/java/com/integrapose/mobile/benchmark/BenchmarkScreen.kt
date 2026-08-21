@@ -1214,7 +1214,12 @@ private fun AutoBenchmarkCard(
                 color = Color(0xFFD6EFE9)
             )
             Text(
-                "Recommended live/image: $streamingLabel",
+                if (BuildConfig.POSTPROCESS_LIVE_ANNOTATED_VIDEO) {
+                    "Native single-worker estimate: $streamingLabel. " +
+                        "Validate actual camera throughput in the Live tab."
+                } else {
+                    "Recommended live/image: $streamingLabel"
+                },
                 color = Color(0xFFD6EFE9)
             )
             if (showDiagnostics) {
@@ -1504,7 +1509,11 @@ private fun BackendChoiceCard(
                 Text("Use both recommendations")
             }
             Text(
-                "Live and image inference",
+                if (BuildConfig.POSTPROCESS_LIVE_ANNOTATED_VIDEO) {
+                    "Native candidate estimate"
+                } else {
+                    "Live and image inference"
+                },
                 fontWeight = FontWeight.SemiBold,
                 color = Color(0xFFE8EFF9)
             )
@@ -1520,7 +1529,13 @@ private fun BackendChoiceCard(
                 enabled = enabled && recommendedProfile != null,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text("Use live/image recommendation")
+                Text(
+                    if (BuildConfig.POSTPROCESS_LIVE_ANNOTATED_VIDEO) {
+                        "Use native estimate"
+                    } else {
+                        "Use live/image recommendation"
+                    }
+                )
             }
             Row(
                 modifier = Modifier.fillMaxWidth(),

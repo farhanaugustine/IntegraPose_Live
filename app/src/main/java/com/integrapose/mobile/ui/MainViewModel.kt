@@ -11,6 +11,10 @@ import com.integrapose.mobile.data.ModelRepository
 import com.integrapose.mobile.inference.AnnotationColorPreset
 import com.integrapose.mobile.inference.AnnotationStyle
 import com.integrapose.mobile.inference.RoiLabelSize
+import com.integrapose.mobile.live.LiveRawVideoQuality
+import com.integrapose.mobile.live.LiveOverlayRefreshRate
+import com.integrapose.mobile.live.LivePreviewQuality
+import com.integrapose.mobile.live.LivePreviewRenderer
 import com.integrapose.mobile.model.ModelRuntime
 import com.integrapose.mobile.model.ModelOutputFormat
 import com.integrapose.mobile.model.ModelType
@@ -19,6 +23,7 @@ import com.integrapose.mobile.model.InferenceModelConfig
 import com.integrapose.mobile.model.ModelExportMetadata
 import com.integrapose.mobile.testing.BundledTestAssets
 import com.integrapose.mobile.tracking.IoUTrackerConfig
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -32,6 +37,10 @@ data class MainUiState(
     val selectedModelId: String? = null,
     val annotationStyle: AnnotationStyle = AnnotationStyle.Default,
     val trackerConfig: IoUTrackerConfig = IoUTrackerConfig(),
+    val liveRawVideoQuality: LiveRawVideoQuality = LiveRawVideoQuality.Default,
+    val livePreviewQuality: LivePreviewQuality = LivePreviewQuality.Default,
+    val livePreviewRenderer: LivePreviewRenderer = LivePreviewRenderer.Default,
+    val liveOverlayRefreshRate: LiveOverlayRefreshRate = LiveOverlayRefreshRate.Default,
     val isBusy: Boolean = false,
     val message: String? = null
 ) {
@@ -44,6 +53,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val dataStore = AppDataStore(application)
     private val annotationStyleSaveMutex = Mutex()
     private val trackerConfigSaveMutex = Mutex()
+    private val liveRawVideoQualitySaveMutex = Mutex()
+    private val livePreviewQualitySaveMutex = Mutex()
+    private val livePreviewRendererSaveMutex = Mutex()
+    private val liveOverlayRefreshRateSaveMutex = Mutex()
 
     private val _uiState = MutableStateFlow(MainUiState())
     val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
@@ -64,30 +77,62 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update { it.copy(trackerConfig = config) }
             }
         }
+        viewModelScope.launch {
+            dataStore.liveRawVideoQualityFlow.collect { quality ->
+                _uiState.update { it.copy(liveRawVideoQuality = quality) }
+            }
+        }
+        viewModelScope.launch {
+            dataStore.livePreviewQualityFlow.collect { quality ->
+                _uiState.update { it.copy(livePreviewQuality = quality) }
+            }
+        }
+        viewModelScope.launch {
+            dataStore.livePreviewRendererFlow.collect { renderer ->
+                _uiState.update { it.copy(livePreviewRenderer = renderer) }
+            }
+        }
+        viewModelScope.launch {
+            dataStore.liveOverlayRefreshRateFlow.collect { rate ->
+                _uiState.update { it.copy(liveOverlayRefreshRate = rate) }
+            }
+        }
 
         refreshModels()
     }
 
     fun refreshModels() {
         viewModelScope.launch {
-            val models = modelRepository.listModels()
-            _uiState.update { current ->
-                val existingSelection = current.selectedModelId
-                val resolvedSelection = when {
-                    models.isEmpty() -> null
-                    existingSelection != null && models.any { it.id == existingSelection } -> existingSelection
-                    else -> models.first().id
+            try {
+                val models = modelRepository.listModels()
+                _uiState.update { current ->
+                    val existingSelection = current.selectedModelId
+                    val resolvedSelection = when {
+                        models.isEmpty() -> null
+                        existingSelection != null && models.any { it.id == existingSelection } ->
+                            existingSelection
+                        else -> models.first().id
+                    }
+
+                    current.copy(
+                        models = models,
+                        selectedModelId = resolvedSelection,
+                        message = null
+                    )
                 }
 
-                current.copy(
-                    models = models,
-                    selectedModelId = resolvedSelection,
-                    message = null
-                )
-            }
-
-            if (uiState.value.selectedModelId != null) {
-                dataStore.setSelectedModelId(uiState.value.selectedModelId)
+                if (uiState.value.selectedModelId != null) {
+                    dataStore.setSelectedModelId(uiState.value.selectedModelId)
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _uiState.update {
+                    it.copy(
+                        isBusy = false,
+                        message = error.message ?: "Could not load the model registry."
+                    )
+                }
             }
         }
     }
@@ -130,6 +175,62 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             trackerConfigSaveMutex.withLock {
                 dataStore.setTrackerConfig(sanitized)
+            }
+        }
+    }
+
+    fun setLiveRawVideoQuality(quality: LiveRawVideoQuality) {
+        _uiState.update {
+            it.copy(
+                liveRawVideoQuality = quality,
+                message = "Live raw recording quality set to ${quality.displayName}."
+            )
+        }
+        viewModelScope.launch {
+            liveRawVideoQualitySaveMutex.withLock {
+                dataStore.setLiveRawVideoQuality(quality)
+            }
+        }
+    }
+
+    fun setLivePreviewQuality(quality: LivePreviewQuality) {
+        _uiState.update {
+            it.copy(
+                livePreviewQuality = quality,
+                message = "Live preview quality set to ${quality.displayName}."
+            )
+        }
+        viewModelScope.launch {
+            livePreviewQualitySaveMutex.withLock {
+                dataStore.setLivePreviewQuality(quality)
+            }
+        }
+    }
+
+    fun setLivePreviewRenderer(renderer: LivePreviewRenderer) {
+        _uiState.update {
+            it.copy(
+                livePreviewRenderer = renderer,
+                message = "Live preview renderer set to ${renderer.displayName}."
+            )
+        }
+        viewModelScope.launch {
+            livePreviewRendererSaveMutex.withLock {
+                dataStore.setLivePreviewRenderer(renderer)
+            }
+        }
+    }
+
+    fun setLiveOverlayRefreshRate(rate: LiveOverlayRefreshRate) {
+        _uiState.update {
+            it.copy(
+                liveOverlayRefreshRate = rate,
+                message = "Live annotation refresh set to ${rate.displayName}."
+            )
+        }
+        viewModelScope.launch {
+            liveOverlayRefreshRateSaveMutex.withLock {
+                dataStore.setLiveOverlayRefreshRate(rate)
             }
         }
     }
@@ -194,21 +295,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteModel(modelId: String) {
         viewModelScope.launch {
             _uiState.update { it.copy(isBusy = true) }
-            runCatching { modelRepository.deleteModel(modelId) }
-                .onFailure { throwable ->
-                    _uiState.update { it.copy(message = throwable.message ?: "Failed to delete model") }
+            try {
+                modelRepository.deleteModel(modelId)
+                val models = modelRepository.listModels()
+                val nextSelection = models.firstOrNull()?.id
+                dataStore.setSelectedModelId(nextSelection)
+
+                _uiState.update {
+                    it.copy(
+                        models = models,
+                        selectedModelId = nextSelection,
+                        isBusy = false
+                    )
                 }
-
-            val models = modelRepository.listModels()
-            val nextSelection = models.firstOrNull()?.id
-            dataStore.setSelectedModelId(nextSelection)
-
-            _uiState.update {
-                it.copy(
-                    models = models,
-                    selectedModelId = nextSelection,
-                    isBusy = false
-                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _uiState.update {
+                    it.copy(
+                        isBusy = false,
+                        message = error.message ?: "Failed to delete model"
+                    )
+                }
             }
         }
     }

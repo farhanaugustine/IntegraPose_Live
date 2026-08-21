@@ -888,7 +888,20 @@ private fun ImportModelDialog(
                         value = inputSize,
                         onValueChange = { inputSize = it.filter(Char::isDigit) },
                         label = { Text("Input size") },
-                        supportingText = { Text("Default 640; 32–2048 and a multiple of 32.") },
+                        supportingText = {
+                            Text(
+                                if (
+                                    BuildConfig.POSTPROCESS_LIVE_ANNOTATED_VIDEO &&
+                                    inspection?.inputSize != null
+                                ) {
+                                    "Detected from model metadata or graph input and used automatically."
+                                } else {
+                                    "Default 640; 32–2048 and a multiple of 32."
+                                }
+                            )
+                        },
+                        enabled = !BuildConfig.POSTPROCESS_LIVE_ANNOTATED_VIDEO ||
+                            inspection?.inputSize == null,
                         isError = inputSize.isNotBlank() && !inputIsValid,
                         singleLine = true,
                         modifier = Modifier

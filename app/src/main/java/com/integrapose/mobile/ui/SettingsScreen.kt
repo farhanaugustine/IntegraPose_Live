@@ -35,9 +35,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import com.integrapose.mobile.BuildConfig
 import com.integrapose.mobile.inference.AnnotationColorPreset
 import com.integrapose.mobile.inference.AnnotationStyle
 import com.integrapose.mobile.inference.RoiLabelSize
+import com.integrapose.mobile.live.LiveOverlayRefreshRate
+import com.integrapose.mobile.live.LivePreviewQuality
+import com.integrapose.mobile.live.LivePreviewRenderer
+import com.integrapose.mobile.live.LiveRawVideoQuality
 import com.integrapose.mobile.model.KeypointConnection
 import com.integrapose.mobile.model.ModelType
 import com.integrapose.mobile.model.InferenceModelConfig
@@ -50,12 +55,20 @@ fun SettingsScreen(
     style: AnnotationStyle,
     selectedModel: InferenceModelConfig?,
     trackerConfig: IoUTrackerConfig,
+    liveRawVideoQuality: LiveRawVideoQuality,
+    livePreviewQuality: LivePreviewQuality,
+    livePreviewRenderer: LivePreviewRenderer,
+    liveOverlayRefreshRate: LiveOverlayRefreshRate,
     onBoundingBoxColorChange: (AnnotationColorPreset) -> Unit,
     onKeypointColorChange: (AnnotationColorPreset) -> Unit,
     onRoiLabelSizeChange: (RoiLabelSize) -> Unit,
     onShowClassIndexChange: (Boolean) -> Unit,
     onSkeletonConnectionsChange: (String, List<KeypointConnection>) -> Unit,
-    onTrackerConfigChange: (IoUTrackerConfig) -> Unit
+    onTrackerConfigChange: (IoUTrackerConfig) -> Unit,
+    onLiveRawVideoQualityChange: (LiveRawVideoQuality) -> Unit,
+    onLivePreviewQualityChange: (LivePreviewQuality) -> Unit,
+    onLivePreviewRendererChange: (LivePreviewRenderer) -> Unit,
+    onLiveOverlayRefreshRateChange: (LiveOverlayRefreshRate) -> Unit
 ) {
     var showLegalAcknowledgements by remember { mutableStateOf(false) }
     if (showLegalAcknowledgements) {
@@ -87,6 +100,20 @@ fun SettingsScreen(
             "Annotation settings apply to Live, Image, Offline, and exported annotated media.",
             color = Color(0xFFBDD0E7)
         )
+
+        if (BuildConfig.POSTPROCESS_LIVE_ANNOTATED_VIDEO) {
+            LivePipelineSettingsCard(
+                selectedModel = selectedModel,
+                rawVideoQuality = liveRawVideoQuality,
+                previewQuality = livePreviewQuality,
+                previewRenderer = livePreviewRenderer,
+                overlayRefreshRate = liveOverlayRefreshRate,
+                onRawVideoQualityChange = onLiveRawVideoQualityChange,
+                onPreviewQualityChange = onLivePreviewQualityChange,
+                onPreviewRendererChange = onLivePreviewRendererChange,
+                onOverlayRefreshRateChange = onLiveOverlayRefreshRateChange
+            )
+        }
 
         Card(colors = CardDefaults.cardColors(containerColor = Color(0x55304455))) {
             Column(
@@ -261,6 +288,170 @@ fun SettingsScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("Legal & acknowledgements")
+        }
+    }
+}
+
+@Composable
+private fun LivePipelineSettingsCard(
+    selectedModel: InferenceModelConfig?,
+    rawVideoQuality: LiveRawVideoQuality,
+    previewQuality: LivePreviewQuality,
+    previewRenderer: LivePreviewRenderer,
+    overlayRefreshRate: LiveOverlayRefreshRate,
+    onRawVideoQualityChange: (LiveRawVideoQuality) -> Unit,
+    onPreviewQualityChange: (LivePreviewQuality) -> Unit,
+    onPreviewRendererChange: (LivePreviewRenderer) -> Unit,
+    onOverlayRefreshRateChange: (LiveOverlayRefreshRate) -> Unit
+) {
+    var rawQualityMenuExpanded by remember { mutableStateOf(false) }
+    var previewQualityMenuExpanded by remember { mutableStateOf(false) }
+    var previewRendererMenuExpanded by remember { mutableStateOf(false) }
+    var overlayRateMenuExpanded by remember { mutableStateOf(false) }
+    Card(colors = CardDefaults.cardColors(containerColor = Color(0x55304455))) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                "Live pipeline",
+                style = MaterialTheme.typography.titleMedium,
+                color = Color(0xFFE8EFF9)
+            )
+            Text(
+                "Camera analysis: 1280 × 720",
+                color = Color(0xFFDDE8F6)
+            )
+            Text(
+                selectedModel?.let { model ->
+                    "Model input: ${model.inputSize} × ${model.inputSize} (${model.name})"
+                } ?: "Model input: select a model",
+                color = Color(0xFFDDE8F6)
+            )
+            Text(
+                "The imported NCNN metadata or ONNX graph input controls the model bitmap " +
+                    "and inference buffers. This global setting does not override it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFFA8F0D3)
+            )
+            Box(modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(
+                    onClick = { previewQualityMenuExpanded = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Visible camera preview: ${previewQuality.displayName}")
+                }
+                DropdownMenu(
+                    expanded = previewQualityMenuExpanded,
+                    onDismissRequest = { previewQualityMenuExpanded = false },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    LivePreviewQuality.entries.forEach { quality ->
+                        DropdownMenuItem(
+                            text = { Text(quality.displayName) },
+                            onClick = {
+                                previewQualityMenuExpanded = false
+                                onPreviewQualityChange(quality)
+                            }
+                        )
+                    }
+                }
+            }
+            Box(modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(
+                    onClick = { previewRendererMenuExpanded = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Preview renderer: ${previewRenderer.displayName}")
+                }
+                DropdownMenu(
+                    expanded = previewRendererMenuExpanded,
+                    onDismissRequest = { previewRendererMenuExpanded = false },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    LivePreviewRenderer.entries.forEach { renderer ->
+                        DropdownMenuItem(
+                            text = { Text(renderer.displayName) },
+                            onClick = {
+                                previewRendererMenuExpanded = false
+                                onPreviewRendererChange(renderer)
+                            }
+                        )
+                    }
+                }
+            }
+            Text(
+                "Performance SurfaceView can reduce composition cost, but Compatible " +
+                    "TextureView remains available if an overlay or rotation regresses.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFFFFD8A8)
+            )
+            Box(modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(
+                    onClick = { overlayRateMenuExpanded = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Screen annotations: ${overlayRefreshRate.displayName}")
+                }
+                DropdownMenu(
+                    expanded = overlayRateMenuExpanded,
+                    onDismissRequest = { overlayRateMenuExpanded = false },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    LiveOverlayRefreshRate.entries.forEach { rate ->
+                        DropdownMenuItem(
+                            text = { Text(rate.displayName) },
+                            onClick = {
+                                overlayRateMenuExpanded = false
+                                onOverlayRefreshRateChange(rate)
+                            }
+                        )
+                    }
+                }
+            }
+            Text(
+                "This limits screen redraws only. Model inference, CSV data, raw video, " +
+                    "and the annotation timeline continue at maximum throughput.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFFA8F0D3)
+            )
+            Box(modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(
+                    onClick = { rawQualityMenuExpanded = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Raw recording: ${rawVideoQuality.displayName}")
+                }
+                DropdownMenu(
+                    expanded = rawQualityMenuExpanded,
+                    onDismissRequest = { rawQualityMenuExpanded = false },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    LiveRawVideoQuality.entries.forEach { quality ->
+                        DropdownMenuItem(
+                            text = {
+                                Text("${quality.displayName} (${quality.dimensionsLabel})")
+                            },
+                            onClick = {
+                                rawQualityMenuExpanded = false
+                                onRawVideoQualityChange(quality)
+                            }
+                        )
+                    }
+                }
+            }
+            Text(
+                "This quality is used for saved raw video, the internal raw master needed " +
+                    "for annotated video, and the real-camera recording benchmark. " +
+                    "CameraX uses the closest supported quality if a camera cannot provide it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFFFFD8A8)
+            )
+            Text(
+                "Changes take effect the next time the Live camera pipeline starts.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFFBDD0E7)
+            )
         }
     }
 }

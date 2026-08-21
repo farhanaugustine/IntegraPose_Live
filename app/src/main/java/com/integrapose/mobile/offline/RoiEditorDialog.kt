@@ -1,6 +1,7 @@
 package com.integrapose.mobile.offline
 
 import android.content.Context
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.media.MediaMetadataRetriever
@@ -62,6 +63,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -78,10 +80,25 @@ fun RoiEditorDialog(
     videoUri: Uri? = null,
     previewBitmap: Bitmap? = null,
     existingRois: List<BehaviorRoi>,
+    landscapeCanvasPriority: Boolean = false,
     onDismiss: () -> Unit,
     onUseRois: (List<BehaviorRoi>) -> Unit
 ) {
     val context = LocalContext.current
+    if (
+        landscapeCanvasPriority &&
+        LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE &&
+        videoUri == null &&
+        previewBitmap != null
+    ) {
+        LandscapeRoiEditor(
+            previewBitmap = previewBitmap,
+            existingRois = existingRois,
+            onDismiss = onDismiss,
+            onUseRois = onUseRois
+        )
+        return
+    }
     var preview by remember(videoUri, previewBitmap) {
         mutableStateOf(previewBitmap)
     }
@@ -472,6 +489,319 @@ fun RoiEditorDialog(
                     ) {
                         Text("Use ${workingRois.size}")
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LandscapeRoiEditor(
+    previewBitmap: Bitmap,
+    existingRois: List<BehaviorRoi>,
+    onDismiss: () -> Unit,
+    onUseRois: (List<BehaviorRoi>) -> Unit
+) {
+    var workingRois by remember(previewBitmap) { mutableStateOf(existingRois) }
+    var selectedRoiId by remember(previewBitmap) {
+        mutableStateOf(existingRois.firstOrNull()?.id)
+    }
+    var canvasSize by remember { mutableStateOf(IntSize.Zero) }
+    var activeGesture by remember { mutableStateOf<RoiEditGesture?>(null) }
+    var dragStart by remember { mutableStateOf<Offset?>(null) }
+    var dragEnd by remember { mutableStateOf<Offset?>(null) }
+    var zoomScale by remember(previewBitmap) { mutableFloatStateOf(MIN_ROI_ZOOM) }
+    var panOffset by remember(previewBitmap) { mutableStateOf(Offset.Zero) }
+    val setZoom: (Float) -> Unit = { requested ->
+        val next = requested.coerceIn(MIN_ROI_ZOOM, MAX_ROI_ZOOM)
+        zoomScale = next
+        panOffset = clampRoiViewportPan(
+            canvasSize,
+            previewBitmap.width,
+            previewBitmap.height,
+            next,
+            panOffset
+        )
+    }
+
+    AdaptiveModal(onDismiss = onDismiss) {
+        Card(
+            modifier = Modifier.fillMaxSize().padding(6.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF162231))
+        ) {
+            Row(
+                modifier = Modifier.fillMaxSize().padding(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Column(
+                    modifier = Modifier.weight(2.2f).fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        "Define dwell-time regions",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = Color(0xFFE8EFF9)
+                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                            .onSizeChanged { size ->
+                                canvasSize = size
+                                panOffset = clampRoiViewportPan(
+                                    size,
+                                    previewBitmap.width,
+                                    previewBitmap.height,
+                                    zoomScale,
+                                    panOffset
+                                )
+                            }
+                    ) {
+                        RoiDrawingSurface(
+                            bitmap = previewBitmap,
+                            canvasSize = canvasSize,
+                            zoomScale = zoomScale,
+                            panOffset = panOffset,
+                            rois = workingRois,
+                            selectedRoiId = selectedRoiId,
+                            dragStart = dragStart,
+                            dragEnd = dragEnd,
+                            onTransform = { centroid, gesturePan, gestureZoom ->
+                                val previous = zoomScale
+                                val safeZoom = gestureZoom.takeIf {
+                                    it.isFinite() && it > 0f
+                                } ?: 1f
+                                val next = (previous * safeZoom)
+                                    .coerceIn(MIN_ROI_ZOOM, MAX_ROI_ZOOM)
+                                val center = Offset(
+                                    canvasSize.width * 0.5f,
+                                    canvasSize.height * 0.5f
+                                )
+                                val focal = (centroid - center - panOffset) *
+                                    (1f - next / previous)
+                                zoomScale = next
+                                panOffset = clampRoiViewportPan(
+                                    canvasSize,
+                                    previewBitmap.width,
+                                    previewBitmap.height,
+                                    next,
+                                    panOffset + gesturePan + focal
+                                )
+                            },
+                            onDragStart = { point, toleranceX, toleranceY ->
+                                val selected = workingRois.firstOrNull {
+                                    it.id == selectedRoiId
+                                }
+                                val corner = selected?.cornerNear(
+                                    point.x,
+                                    point.y,
+                                    toleranceX,
+                                    toleranceY
+                                )
+                                when {
+                                    selected != null && corner != null -> {
+                                        activeGesture = RoiEditGesture(
+                                            RoiEditKind.RESIZE,
+                                            selected.id,
+                                            point,
+                                            selected,
+                                            corner
+                                        )
+                                    }
+                                    else -> {
+                                        val hit = workingRois.asReversed().firstOrNull {
+                                            it.containsNormalized(point.x, point.y)
+                                        }
+                                        if (hit != null) {
+                                            selectedRoiId = hit.id
+                                            activeGesture = RoiEditGesture(
+                                                RoiEditKind.MOVE,
+                                                hit.id,
+                                                point,
+                                                hit
+                                            )
+                                        } else {
+                                            selectedRoiId = null
+                                            activeGesture = RoiEditGesture(
+                                                RoiEditKind.CREATE,
+                                                start = point
+                                            )
+                                            dragStart = point
+                                            dragEnd = point
+                                        }
+                                    }
+                                }
+                            },
+                            onDrag = { point ->
+                                val gesture = activeGesture ?: return@RoiDrawingSurface
+                                when (gesture.kind) {
+                                    RoiEditKind.CREATE -> dragEnd = point
+                                    RoiEditKind.MOVE -> {
+                                        val original = gesture.original
+                                            ?: return@RoiDrawingSurface
+                                        workingRois = workingRois.map { roi ->
+                                            if (roi.id == gesture.roiId) {
+                                                original.movedBy(
+                                                    point.x - gesture.start.x,
+                                                    point.y - gesture.start.y
+                                                )
+                                            } else roi
+                                        }
+                                    }
+                                    RoiEditKind.RESIZE -> {
+                                        val original = gesture.original
+                                            ?: return@RoiDrawingSurface
+                                        val corner = gesture.corner
+                                            ?: return@RoiDrawingSurface
+                                        workingRois = workingRois.map { roi ->
+                                            if (roi.id == gesture.roiId) {
+                                                original.resizedFrom(corner, point.x, point.y)
+                                            } else roi
+                                        }
+                                    }
+                                }
+                            },
+                            onDragCancelled = {
+                                val gesture = activeGesture
+                                gesture?.original?.let { original ->
+                                    workingRois = workingRois.map { roi ->
+                                        if (roi.id == gesture.roiId) original else roi
+                                    }
+                                }
+                                activeGesture = null
+                                dragStart = null
+                                dragEnd = null
+                            },
+                            onDragFinished = {
+                                val gesture = activeGesture
+                                val start = dragStart
+                                val end = dragEnd
+                                if (
+                                    gesture?.kind == RoiEditKind.CREATE &&
+                                    start != null && end != null
+                                ) {
+                                    val left = minOf(start.x, end.x)
+                                    val right = maxOf(start.x, end.x)
+                                    val top = minOf(start.y, end.y)
+                                    val bottom = maxOf(start.y, end.y)
+                                    if (
+                                        right - left >= MINIMUM_ROI_SIZE &&
+                                        bottom - top >= MINIMUM_ROI_SIZE
+                                    ) {
+                                        val newRoi = BehaviorRoi(
+                                            id = "roi_${System.nanoTime()}",
+                                            name = "ROI ${workingRois.size + 1}",
+                                            left = left,
+                                            top = top,
+                                            right = right,
+                                            bottom = bottom
+                                        )
+                                        workingRois = workingRois + newRoi
+                                        selectedRoiId = newRoi.id
+                                    }
+                                }
+                                activeGesture = null
+                                dragStart = null
+                                dragEnd = null
+                            }
+                        )
+                    }
+                }
+
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        "Draw, move, or resize on the frame. Pinch to zoom and pan.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFC8D6E8)
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "${(zoomScale * 100f).roundToInt()}%",
+                            modifier = Modifier.weight(1f),
+                            color = Color(0xFFA8F0D3)
+                        )
+                        OutlinedButton(
+                            onClick = { setZoom(zoomScale - ZOOM_STEP) },
+                            enabled = zoomScale > MIN_ROI_ZOOM
+                        ) { Text("-") }
+                        OutlinedButton(
+                            onClick = { setZoom(zoomScale + ZOOM_STEP) },
+                            enabled = zoomScale < MAX_ROI_ZOOM
+                        ) { Text("+") }
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            panOffset = Offset.Zero
+                            setZoom(MIN_ROI_ZOOM)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Reset view") }
+
+                    if (workingRois.isEmpty()) {
+                        Text("No regions yet.", color = Color(0xFFFFD2A6))
+                    } else {
+                        workingRois.forEachIndexed { index, roi ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { selectedRoiId = roi.id },
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                OutlinedTextField(
+                                    value = roi.name,
+                                    onValueChange = { name ->
+                                        workingRois = workingRois.toMutableList().also {
+                                            it[index] = roi.copy(name = name)
+                                        }
+                                    },
+                                    label = { Text("Region ${index + 1}") },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                IconButton(
+                                    onClick = {
+                                        workingRois = workingRois.filterNot { it.id == roi.id }
+                                        if (selectedRoiId == roi.id) {
+                                            selectedRoiId = workingRois.firstOrNull()?.id
+                                        }
+                                    }
+                                ) {
+                                    Icon(
+                                        Icons.Default.Delete,
+                                        contentDescription = "Delete ${roi.name}"
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            workingRois = emptyList()
+                            selectedRoiId = null
+                        },
+                        enabled = workingRois.isNotEmpty(),
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Clear regions") }
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Cancel") }
+                    Button(
+                        onClick = {
+                            onUseRois(workingRois.map(BehaviorRoi::sanitized))
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Use ${workingRois.size}") }
                 }
             }
         }

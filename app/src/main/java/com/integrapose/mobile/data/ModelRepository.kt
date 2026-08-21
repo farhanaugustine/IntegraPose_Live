@@ -2,6 +2,7 @@ package com.integrapose.mobile.data
 
 import android.content.Context
 import android.net.Uri
+import android.util.AtomicFile
 import androidx.documentfile.provider.DocumentFile
 import com.integrapose.mobile.model.ModelOutputFormat
 import com.integrapose.mobile.model.ModelRuntime
@@ -17,6 +18,8 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.io.FileNotFoundException
+import java.io.FileOutputStream
 
 class ModelRepository(private val context: Context) {
     private val json = Json { prettyPrint = true; ignoreUnknownKeys = true }
@@ -24,6 +27,7 @@ class ModelRepository(private val context: Context) {
 
     private val modelDir: File = File(context.filesDir, "models").also { it.mkdirs() }
     private val configFile: File = File(context.filesDir, "model_registry.json")
+    private val atomicConfigFile = AtomicFile(configFile)
 
     suspend fun listModels(): List<InferenceModelConfig> = mutex.withLock {
         loadRegistryUnsafe().models
@@ -66,27 +70,32 @@ class ModelRepository(private val context: Context) {
                 throw error
             }
 
-            val config = InferenceModelConfig(
-                id = id,
-                name = name.ifBlank { "Imported model ${registry.models.size + 1}" },
-                filePath = modelFile.absolutePath,
-                type = type,
-                runtime = ModelRuntime.ONNX_CPU,
-                inputSize = inputSize,
-                confThreshold = confThreshold.coerceIn(0.01f, 0.99f),
-                iouThreshold = iouThreshold.coerceIn(0.05f, 0.95f),
-                classNames = classNames.filter { it.isNotBlank() },
-                outputFormat = outputFormat,
-                detectionCount = (
-                    exportMetadata.exportDetectionCount ?: detectionCount
-                    ).coerceIn(1, 5_000),
-                exportMetadata = exportMetadata
-            )
-            config.requireSupportedModel()
+            try {
+                val config = InferenceModelConfig(
+                    id = id,
+                    name = name.ifBlank { "Imported model ${registry.models.size + 1}" },
+                    filePath = modelFile.absolutePath,
+                    type = type,
+                    runtime = ModelRuntime.ONNX_CPU,
+                    inputSize = inputSize,
+                    confThreshold = confThreshold.coerceIn(0.01f, 0.99f),
+                    iouThreshold = iouThreshold.coerceIn(0.05f, 0.95f),
+                    classNames = classNames.filter { it.isNotBlank() },
+                    outputFormat = outputFormat,
+                    detectionCount = (
+                        exportMetadata.exportDetectionCount ?: detectionCount
+                        ).coerceIn(1, 5_000),
+                    exportMetadata = exportMetadata
+                )
+                config.requireSupportedModel()
 
-            val updated = registry.copy(models = registry.models + config)
-            saveRegistryUnsafe(updated)
-            config
+                val updated = registry.copy(models = registry.models + config)
+                saveRegistryUnsafe(updated)
+                config
+            } catch (error: Throwable) {
+                modelFile.delete()
+                throw error
+            }
         }
     }
 
@@ -245,6 +254,9 @@ class ModelRepository(private val context: Context) {
             val registry = loadRegistryUnsafe()
             val target = registry.models.firstOrNull { it.id == modelId } ?: return@withContext
 
+            val updated = registry.copy(models = registry.models.filterNot { it.id == modelId })
+            saveRegistryUnsafe(updated)
+
             runCatching { File(target.filePath).delete() }
             target.auxiliaryFilePath?.let { path ->
                 runCatching { File(path).delete() }
@@ -253,8 +265,6 @@ class ModelRepository(private val context: Context) {
                 runCatching { File(path).delete() }
             }
 
-            val updated = registry.copy(models = registry.models.filterNot { it.id == modelId })
-            saveRegistryUnsafe(updated)
         }
     }
 
@@ -331,14 +341,33 @@ class ModelRepository(private val context: Context) {
     }
 
     private fun loadRegistryUnsafe(): ModelRegistry {
-        if (!configFile.exists()) return ModelRegistry()
-        return runCatching {
-            json.decodeFromString<ModelRegistry>(configFile.readText())
-        }.getOrElse { ModelRegistry() }
+        return try {
+            atomicConfigFile.openRead().bufferedReader(Charsets.UTF_8).use { reader ->
+                json.decodeFromString<ModelRegistry>(reader.readText())
+            }
+        } catch (_: FileNotFoundException) {
+            ModelRegistry()
+        } catch (error: Throwable) {
+            throw IllegalStateException(
+                "The saved model registry is unreadable. Imported model files were preserved; " +
+                    "restore the registry from backup or re-import the models.",
+                error
+            )
+        }
     }
 
     private fun saveRegistryUnsafe(registry: ModelRegistry) {
-        configFile.writeText(json.encodeToString(registry))
+        val bytes = json.encodeToString(registry).toByteArray(Charsets.UTF_8)
+        var output: FileOutputStream? = null
+        try {
+            output = atomicConfigFile.startWrite()
+            output.write(bytes)
+            atomicConfigFile.finishWrite(output)
+            output = null
+        } catch (error: Throwable) {
+            output?.let(atomicConfigFile::failWrite)
+            throw IllegalStateException("Could not save the model registry.", error)
+        }
     }
 }
 
