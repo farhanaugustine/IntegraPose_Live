@@ -41,6 +41,10 @@ SHA256SUMS*
 *.webm
 *.wav
 
+# Public GitHub Pages demonstrations are intentionally versioned. Keep the
+# broad media rules above for private experiment files everywhere else.
+!docs/assets/media/*.mp4
+
 # Private R&D and local validation data
 models_videos/
 emulator_outputs/

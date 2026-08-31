@@ -1,0 +1,4 @@
+# The parent Android repository ignores private MP4 experiment files. These
+# short, attributed website demonstrations are public assets and must be
+# committed for GitHub Pages playback.
+!assets/media/*.mp4
