@@ -468,17 +468,17 @@ are available under **Settings > Legal & acknowledgements**.
 
 ## License and disclaimer
 
-No software license is currently granted for this repository. All rights are
-reserved unless otherwise stated. A formal license may be added in a future
-release.
+This software is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 
-This software is provided **AS IS**, without warranty of any kind, express or
-implied, including but not limited to warranties of merchantability, fitness for
-a particular purpose, and non-infringement.
+This software is provided **AS IS,** without warranty of any kind, express or implied, 
+including but not limited to warranties of merchantability, fitness for a particular 
+purpose, and non-infringement.
 
-By downloading, copying, installing, executing, or otherwise using any portion
-of this repository, you acknowledge that you assume the risks associated with
-its use. To the fullest extent permitted by applicable law, the authors,
-contributors, and copyright holders are not liable for loss, damage, erroneous
-results, data loss, or other consequences arising from use of or reliance on
-this software.
+By downloading, copying, installing, executing, or otherwise using this software, you 
+assume the risks associated with its use. To the fullest extent permitted by applicable 
+law, the authors, contributors, and copyright holders shall not be liable for any loss, 
+damage, erroneous results, loss of data, or other consequences arising from the use of 
+or reliance on this software.
+
+This disclaimer is intended to supplement, and does not modify or replace, the terms of 
+the GNU Affero General Public License v3.0. See the LICENSE file for the complete license terms.
